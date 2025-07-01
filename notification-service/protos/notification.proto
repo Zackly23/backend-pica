@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package notification;
+
+// option go_package = "github.com/Zackly23/queue-app/album-service/proto/notificationpb;notificationpb";
+
+// import "google/protobuf/empty.proto";
+
+service NotificationService {
+  // Kirim notifikasi; unary invocation
+  rpc SendNotification(NotificationRequest) returns (NotificationResponse);
+}
+
+message NotificationRequest {
+  string to = 1;       // Tujuan: email, phone, device token, dll.
+  string subject = 2;  // Subjek (untuk email)
+  string body = 3;     // Isi pesan
+  string type = 4;
+  string name = 5;
+  map<string, string> metadata = 6; // Data tambahan (optional)
+}
+
+message NotificationResponse {
+  string message = 1;    // Balasan singkat
+  int32 status_code = 2; // 200 = sukses, 400/500 = error
+}
+

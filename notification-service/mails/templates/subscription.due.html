@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Subscription Due Reminder</title>
+  </head>
+  <body style="font-family: Arial; padding: 30px; background: #f3f3f3">
+    <div
+      style="
+        max-width: 600px;
+        margin: auto;
+        background: #fff;
+        padding: 20px;
+        border-radius: 8px;
+      "
+    >
+      <h2>Hello {{name}},</h2>
+      <p>
+        This is a reminder that your subscription is due on
+        <strong>{{due_date}}</strong>.
+      </p>
+      <p>Please renew it to avoid any interruption of service.</p>
+      <a
+        href="{{renew_link}}"
+        style="
+          display: inline-block;
+          background-color: #28a745;
+          color: white;
+          padding: 10px 15px;
+          text-decoration: none;
+          border-radius: 4px;
+        "
+        >Renew Now</a
+      >
+      <p>Thanks,<br />The Billing Team</p>
+    </div>
+  </body>
+</html>

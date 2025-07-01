@@ -1,0 +1,45 @@
+# Node.js
+/notification-service/node_modules/
+/notification-service/npm-debug.log*
+.node_repl_history
+
+# Logs
+/notification-service/logs/
+/notification-service/*.log
+
+# Environment variables
+/notification-service/.env
+/notification-service/.env.*
+
+# Build artifacts
+/notification-service/dist/
+/notification-service/build/
+
+# Optional npm cache directory
+/notification-service/.npm/
+
+# Optional eslint cache
+/notification-service/.eslintcache
+
+# macOS specific files
+.DS_Store
+
+# IDE specific files (e.g., VS Code)
+.vscode/
+
+# Test coverage reports
+coverage/
+
+/album-service/coverage/
+
+/album-service/node_modules/
+
+/album-service/tmp
+
+/album-service/.env
+/album-service/.env.*
+
+/album-service/storages/images
+/album-service/storages/videos
+
+docker-compose.yml
