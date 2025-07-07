@@ -10,5 +10,9 @@ func GetModels() []interface{} {
 		&AlbumImage{},
 		&AlbumVideo{},
 		&TempMedia{},
+		&AlbumComment{},
+		&AlbumLike{},
+		&MediaLike{},
+		// &Permission{},
 	}
 }

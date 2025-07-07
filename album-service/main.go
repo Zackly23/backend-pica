@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 
@@ -38,7 +39,7 @@ func main() {
 	}
 	log.Println("Database connected successfully")
 
-	conn, err := grpc.Dial(":50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(":50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
     if err != nil {
         log.Fatalf("did not connect: %v", err)
     }
@@ -48,7 +49,9 @@ func main() {
     client := notif.NewNotificationServiceClient(conn)
 
 	// Init Fiber
-	app := fiber.New()
+	app := fiber.New(fiber.Config{
+		BodyLimit: 100 * 1024 * 1024, // 100 MB misalnya
+	})
 
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "http://localhost:5173",
@@ -60,6 +63,11 @@ func main() {
 
 	// Register routes
 	routes.SetupRoutes(app, db, client)
+
+		// Cek semua route saat app jalan
+	for _, route := range app.GetRoutes() {
+		fmt.Printf("Method: %-6s Path: %s\n", route.Method, route.Path)
+	}
 
 	// Start server
 	port := os.Getenv("PORT")

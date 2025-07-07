@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime/multipart"
+	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Zackly23/queue-app/models"
@@ -19,9 +22,21 @@ type UserDetail struct {
 	UserID uuid.UUID `json:"user_id"`
 	FirstName    string `json:"first_name"`
 	LastName     string `json:"last_name"`
+	FullName	 string `json:"full_name"`
 	Email        string `json:"email"`
 	ProfilePicture string `json:"profile_picture,omitempty"`
 }
+
+type AlbumCommentResponse struct {
+	ID        uuid.UUID `json:"id"`
+	AlbumID   uuid.UUID `json:"album_id"`
+	UserID    uuid.UUID `json:"user_id"`
+	User      string    `json:"user"` // bisa nama user atau struct kecil
+	UserAvatar string	`json:"user_avatar"`
+	Comment   string    `json:"comment"`
+	CreatedAt string    `json:"created_at"` // dalam format human-readable
+}
+
 
 type AlbumMedia struct {
 	AlbumMediaID uuid.UUID      `json:"album_media_id"`
@@ -29,6 +44,7 @@ type AlbumMedia struct {
 	AlbumID      uuid.UUID      `json:"album_id"`
 	Description  string    `json:"description"`
 	LikesCount   uint      `json:"likes_count"`
+	UserHasLike	bool		`json:"user_has_like"`
 	URL          string    `json:"url"`
 	Size         float32   `json:"size"`
 	Type         string    `json:"type"`
@@ -37,15 +53,19 @@ type AlbumMedia struct {
 }
 
 type AlbumDetailRequest struct {
+	AlbumID      uuid.UUID  	`json:"album_id"`
 	UserID       uuid.UUID          `json:"user_id"`
 	UserDetail	UserDetail    `json:"user_detail"`
 	Tags         []string      `json:"tags,omitempty"`         // array string
 	Title        string        `json:"title"`
 	Description  string        `json:"description,omitempty"`
+	LikeCount	int				`json:"like_count"`
+	ImageCount int `json:"image_count"`
+	VideoCount int `json:"video_count"`
 	AlbumPrivacy string        `json:"album_privacy"`          // e.g. "public", "private"
 	TargetEmail  json.RawMessage `json:"target_email"`
 	AlbumImages  []AlbumImageRequest `json:"album_images,omitempty"` // nested images
-	AlbumVideos  []AlbumVideoRequest `json:"album_videos,omitempty`
+	AlbumVideos  []AlbumVideoRequest `json:"album_videos,omitempty"`
 }
 
 type AlbumImageRequest struct {
@@ -70,6 +90,42 @@ type AlbumVideoRequest struct {
 	CreatedAt   time.Time      `json:"created_at" gorm:"autoCreateTime"`
 }
 
+func updateImage(db *gorm.DB, imageDescription string, albumImageID any) error {
+	// Coba konversi ID
+	if idStr, ok := albumImageID.(string); ok {
+		if id, err := uuid.Parse(idStr); err == nil{
+			// Update gambar jika ID valid
+			var existingImage models.AlbumImage
+			if err := db.First(&existingImage, id).Error; err == nil {
+				existingImage.Description = imageDescription
+				return db.Save(&existingImage).Error
+			}
+		}
+	}
+
+	return &fiber.Error{Code: 300, Message: "Failed to update"}
+
+}
+
+func updateVideo(db *gorm.DB, videoDescription string, albumVideoId any) error {
+
+	if idStr, ok := albumVideoId.(string); ok {
+		if id, err := uuid.Parse(idStr); err == nil {
+			var existingVideo models.AlbumVideo
+			if err := db.First(&existingVideo, id).Error; err == nil {
+				existingVideo.Description = videoDescription
+				// ThumbnailURL bisa digenerate kemudian
+				return db.Save(&existingVideo).Error
+			}
+		}
+	}
+
+	return &fiber.Error{Code: 300, Message: "Failed to update video"}
+
+
+	
+}
+
 func storeImage(db *gorm.DB, file *multipart.FileHeader, albumID uuid.UUID, imageDescription string, albumImageID any) error {
 	dst := fmt.Sprintf("./storages/images/%s", file.Filename)
 	if err := utils.SaveMultipartFile(file, dst); err != nil {
@@ -81,7 +137,7 @@ func storeImage(db *gorm.DB, file *multipart.FileHeader, albumID uuid.UUID, imag
 
 	// Coba konversi ID
 	if idStr, ok := albumImageID.(string); ok {
-		if id, err := strconv.ParseUint(idStr, 10, 64); err == nil && id > 0 {
+		if id, err := uuid.Parse(idStr); err == nil{
 			// Update gambar jika ID valid
 			var existingImage models.AlbumImage
 			if err := db.First(&existingImage, id).Error; err == nil {
@@ -116,7 +172,7 @@ func storeVideo(db *gorm.DB, file *multipart.FileHeader, albumID uuid.UUID, vide
 	mimeType := file.Header.Get("Content-Type")
 
 	if idStr, ok := albumVideoId.(string); ok {
-		if id, err := strconv.ParseUint(idStr, 10, 64); err == nil && id > 0 {
+		if id, err := uuid.Parse(idStr); err == nil {
 			var existingVideo models.AlbumVideo
 			if err := db.First(&existingVideo, id).Error; err == nil {
 				existingVideo.VideoURL = dst
@@ -141,6 +197,68 @@ func storeVideo(db *gorm.DB, file *multipart.FileHeader, albumID uuid.UUID, vide
 
 	return db.Create(&video).Error
 }
+
+func deleteVideo(db *gorm.DB, albumVideoId uuid.UUID) error {
+	var video models.AlbumVideo
+
+	// Cari video berdasarkan ID
+	err := db.First(&video, "id = ?", albumVideoId).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("video with ID %s not found", albumVideoId)
+		}
+		return fmt.Errorf("failed to query video: %w", err)
+	}
+
+	fmt.Println(albumVideoId)
+
+	// Hapus data video di database
+	if err := db.Delete(&video).Error; err != nil {
+		return fmt.Errorf("failed to delete video: %w", err)
+	}
+
+	// TODO: Hapus file video dari storage jika diperlukan
+	if err := os.Remove(video.VideoURL); err != nil {
+		fmt.Printf("Failed to delete video file: %v", err)
+	}
+
+	return nil
+}
+
+func deleteImage(db *gorm.DB, albumImageId uuid.UUID) error {
+	var image models.AlbumImage
+
+	fmt.Println("image id : ", albumImageId)
+
+	err := db.First(&image, "id = ?", albumImageId).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			fmt.Println("❌ GORM: record not found")
+			return fmt.Errorf("image with ID %s not found", albumImageId)
+		}
+		fmt.Println("❌ GORM Error lain:", err)
+		return fmt.Errorf("failed to query image: %w", err)
+	}
+
+	fmt.Println("✅ Berhasil ambil image:", image)
+
+	// Hapus image record
+	if err := db.Delete(&image).Error; err != nil {
+		return fmt.Errorf("failed to delete image: %w", err)
+	}
+
+	if image.ImageURL != "" {
+		fmt.Println("🔄 File yang akan dihapus:", image.ImageURL)
+		if err := os.Remove(image.ImageURL); err != nil {
+			fmt.Printf("⚠️ Gagal hapus file: %v\n", err)
+			// optional: return error jika wajib dihapus
+		}
+	}
+
+	return nil
+}
+
+
 
 func storeTags(form *multipart.Form, db *gorm.DB, album models.Album) error {
 	tags := form.Value["tags"]
@@ -187,7 +305,6 @@ func StoreAlbums(ctx *fiber.Ctx, db *gorm.DB) error {
 
 	description := ctx.FormValue("description")
 	albumPrivacy := ctx.FormValue("album_privacy")
-
 	
 	//get target email
 	form, err := ctx.MultipartForm()
@@ -242,11 +359,14 @@ func StoreAlbums(ctx *fiber.Ctx, db *gorm.DB) error {
 	// Upload file (images & videos)
 	images := form.File["album_images"]
 	imageDescriptions := form.Value["image_descriptions"]
+
+	fmt.Println("images ", images)
 	for index, file := range images {
-		// fmt.Println("Image : ", file)
-		// fmt.Println("index image : ", index)
+		fmt.Println("Image : ", file)
+		fmt.Println("index image : ", index)
 		imageDescription := imageDescriptions[index]
-		// fmt.Println("Deskripsi : ", imageDescription)
+
+		fmt.Println("Deskripsi : ", imageDescription)
 		if err := storeImage(db, file, album.ID, imageDescription, nil); err != nil {
 			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"message": "Gagal menyimpan gambar",
@@ -280,6 +400,13 @@ func UpdateAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 	}
 
 	albumID := ctx.Params("albumID")
+
+	// albumId, errParse := uuid.Parse(albumID)
+
+	// if errParse != nil {
+		// return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Gagal Parsing Album ID"})
+	// }
+
 	var albumRequest models.Album
 	if err := db.Where("id = ?", albumID).First(&albumRequest).Error; err != nil {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Album Tidak Ditemukan"})
@@ -317,30 +444,123 @@ func UpdateAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 	// Upload file (images & videos)
 	images := form.File["album_images"]
 	imageDescriptions := form.Value["image_descriptions"]
-	albumImageIds := form.Value["album_image_ids"]
-	for index, file := range images {
-		imageDescription := imageDescriptions[index]
-		albumImageId := albumImageIds[index] //convert to uint
+	imageStatuses := form.Value["image_statuses"]
 
-		if err := storeImage(db, file, albumRequest.ID, imageDescription, albumImageId); err != nil {
-			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"message": "Gagal menyimpan gambar",
-				"error":   err.Error(),
-			})
+	fmt.Println(imageStatuses)
+	// fmt.Println("images ada berapa : ", images)
+	albumImageIds := form.Value["album_image_ids"]
+
+	fmt.Println("Jumlah images         :", len(images))
+	fmt.Println("Jumlah imageStatuses  :", len(imageStatuses))
+	fmt.Println("Jumlah imageDesc      :", len(imageDescriptions))
+	fmt.Println("Jumlah albumImageIds  :", len(albumImageIds))
+	imageIndex := 0
+	for index, imageStatus := range imageStatuses {
+		// fmt.Println(file)
+		imageDescription := imageDescriptions[index]
+		// imageStatus := imageStatuses[index]
+		albumImageId := albumImageIds[index]
+
+		fmt.Println("status image : ", imageStatus)
+		fmt.Println("index : ", index)
+
+		if (imageStatus == "delete") {
+			fmt.Println("status image  delete: ", imageStatus)
+
+			albumImageID, errParse := uuid.Parse(albumImageId)
+
+			if errParse != nil {
+				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error": "Gagal Parse video ID",
+				})
+			}
+
+			fmt.Println("album id image : ", albumImageID)
+			
+			if err := deleteImage(db, albumImageID); err != nil {
+				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error": "Error Delete Image",
+				})
+			}
+
+		} else if (imageStatus == "new") {
+			fmt.Println("status image else : ", imageStatus)
+
+			file := images[imageIndex]
+
+			if err := storeImage(db, file, albumRequest.ID, imageDescription, albumImageId); err != nil {
+				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"message": "Gagal menyimpan gambar",
+					"error":   err.Error(),
+				})
+			}
+
+			imageIndex++
+			
+		} else {
+			fmt.Println("status image else : ", imageStatus)
+
+			
+			if err := updateImage(db, imageDescription, albumImageId); err != nil {
+				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"message": "Gagal Update gambar",
+					"error":   err.Error(),
+				})
+			}
 		}
 	}
 
 	videos := form.File["album_videos"]
 	videoDescriptions := form.Value["video_descriptions"]
 	albumVideoIds := form.Value["album_video_ids"]
-	for index, file := range videos {
+	videoStatuses := form.Value["video_statuses"]
+	videoIndex := 0
+
+
+	fmt.Println("Jumlah video         :", len(videos))
+	fmt.Println("Jumlah videoStatuses  :", len(videoStatuses))
+	fmt.Println("Jumlah videoDescriptions      :", len(videoDescriptions))
+	fmt.Println("Jumlah albumVideoIds  :", len(albumVideoIds))
+	for index, videoStatus := range videoStatuses {
 		videoDescription := videoDescriptions[index]
-		albumVideoId := albumVideoIds[index]
-		if err := storeVideo(db, file, albumRequest.ID, videoDescription, albumVideoId); err != nil {
-			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"message": "Gagal menyimpan video",
-				"error":   err.Error(),
-			})
+		// videoStatus := videoStatuses[index]
+		albumVideoID := albumVideoIds[index]
+		
+		if videoStatus == "delete" {
+
+			albumVideoId, errParse := uuid.Parse(albumVideoID)
+
+			if errParse != nil {
+				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error": "Gagal Parse video ID",
+				})
+			}
+
+			if err := deleteVideo(db, albumVideoId); err != nil {
+				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"message": "Gagal Menghapus video",
+					"error":   err.Error(),
+				})
+			}
+		} else if (videoStatus == "new") {
+
+			file := videos[videoIndex]
+
+			if err := storeVideo(db, file, albumRequest.ID, videoDescription, albumVideoID); err != nil {
+				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"message": "Gagal menyimpan video",
+					"error":   err.Error(),
+				})
+			}
+
+			videoIndex++
+		} else {
+			if err := updateVideo(db, videoDescription, albumVideoID); err != nil {
+				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"message": "Gagal Update video",
+					"error":   err.Error(),
+				})
+			}
 		}
 	}
 
@@ -366,13 +586,15 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 
 	var user models.User
 
-	if err := db.Where("id = ?", userID).First(&user).Error; err != nil {
+	if errAcc := db.Where("id = ?", userID).First(&user).Error; errAcc != nil {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Akun Tidak Ditemukan"})
 	}
 
 	albumID := ctx.Params("albumId")
 
 	albumId, errParse := uuid.Parse(albumID)
+
+	// fmt.Println("Album kok ID : ", albumId)
 
 	if errParse != nil {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -381,20 +603,64 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 	}
 
 	var albumRequest models.Album
-	if err := db.Preload("Tags").Preload("AlbumImages").Preload("AlbumVideos").Where("id = ?", albumId).First(&albumRequest).Error; err != nil {
+	if errAlbum := db.Preload("Tags").Preload("AlbumImages").Preload("AlbumVideos").Where("id = ?", albumId).First(&albumRequest).Error; errAlbum != nil {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Album Tidak Ditemukan"})
 	}
 
-	if userID != albumRequest.UserID {
+	// if userID != albumRequest.UserID {
+	// 	return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{
+	// 		"message": "Album does not belong to user",
+	// 	})
+	// }
+
+	switch albumRequest.AlbumPrivacy {
+	case "restricted":
+		var allowedEmails []string
+		if errCheck := json.Unmarshal(albumRequest.TargetEmail, &allowedEmails); errCheck != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Gagal Mendapatkan Target Email",
+			})
+		}
+
+		// Cek apakah email user ada di daftar allowedEmails
+		allowed := false
+		for _, email := range allowedEmails {
+			if email == user.Email {
+				allowed = true
+				break
+			}
+		}
+
+		if !allowed {
+			return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "User Tidak Diperbolehkan Melihat Album",
+			})
+		}
+
+	case "public":
+		// Tidak ada batasan, lanjut
+	case "private":
 		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"message": "Album does not belong to user",
+			"error": "User Tidak Diperbolehkan Melihat Album",
 		})
 	}
 
+		
 	var albumMedias []AlbumMedia
 	var indexMedia uuid.UUID
+	imageCount := 0
 
 	for _, img := range albumRequest.AlbumImages {
+	// Check apakah user sudah like media ini
+		hasLike := true
+		if errLike := db.Where("user_id = ? AND media_id = ?", userID, img.ID).First(&models.MediaLike{}).Error; errLike != nil {
+			if errors.Is(errLike, gorm.ErrRecordNotFound) {
+				hasLike = false
+			} else {
+				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal cek like media"})
+			}
+		}
+
 		indexMedia = uuid.New()
 		albumMedias = append(albumMedias, AlbumMedia{
 			AlbumMediaID: indexMedia,
@@ -406,12 +672,26 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 			Size:         img.Size,
 			Type:         img.Type,
 			CreatedAt:    img.CreatedAt,
+			UserHasLike:  hasLike,
 			MediaKind:    "image",
 		})
-		
+
+		imageCount++
 	}
 
+	videoCount := 0
+
 	for _, vid := range albumRequest.AlbumVideos {
+		hasLike := true
+		if errLikeMedia := db.Where("user_id = ? AND media_id = ?", userID, vid.ID).First(&models.MediaLike{}).Error; errLikeMedia != nil {
+			if errors.Is(errLikeMedia, gorm.ErrRecordNotFound) {
+				hasLike = false
+			} else {
+				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal cek like media"})
+			}
+		}
+
+
 		indexMedia = uuid.New()
 		albumMedias = append(albumMedias, AlbumMedia{
 			AlbumMediaID: indexMedia,
@@ -419,42 +699,53 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 			AlbumID:      vid.AlbumID,
 			Description:  vid.Description,
 			LikesCount:   vid.LikesCount,
+			UserHasLike:  hasLike,
 			URL:          vid.VideoURL,
 			Size:         vid.Size,
 			Type:         vid.Type,
 			CreatedAt:    vid.CreatedAt,
 			MediaKind:    "video",
 		})
-		
+
+		videoCount++
+		// likeCounts += int(vid.LikesCount)
 	}
 
-	sortBy := ctx.Query("sort_by", "recent") // Options: recent, oldest, popular
+
+	sortBy := ctx.Query("sort_by", "date") // Options: date, title, popular
 	orderBy := ctx.Query("order_by", "DESC") // Options: DESC, ASC
 
-	lessFunc := func(i, j int) bool { return false }
+
+	lessFunc := func(i, j int) bool {
+		return albumMedias[i].CreatedAt.After(albumMedias[j].CreatedAt) // default: by date desc
+	}
 
 	switch sortBy {
-	case "oldest":
+	case "date":
 		lessFunc = func(i, j int) bool {
-			return albumMedias[i].CreatedAt.Before(albumMedias[j].CreatedAt)
+			return albumMedias[i].CreatedAt.After(albumMedias[j].CreatedAt)
 		}
 	case "popular":
 		lessFunc = func(i, j int) bool {
 			return albumMedias[i].LikesCount > albumMedias[j].LikesCount
 		}
-	default: // recent
+	case "title":
 		lessFunc = func(i, j int) bool {
-			return albumMedias[i].CreatedAt.After(albumMedias[j].CreatedAt)
+			return strings.ToLower(albumMedias[i].Description) < strings.ToLower(albumMedias[j].Description)
 		}
 	}
 
 	// If orderBy is ASC, reverse the lessFunc logic
-	if orderBy == "ASC" {
-		origLessFunc := lessFunc
+	if strings.ToUpper(orderBy) == "ASC" {
+		original := lessFunc
 		lessFunc = func(i, j int) bool {
-			return origLessFunc(j, i)
+			return original(j, i)
 		}
 	}
+
+	// Apply sorting
+	sort.Slice(albumMedias, lessFunc)
+
 
 	sort.SliceStable(albumMedias, lessFunc)
 
@@ -471,29 +762,56 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 		albumTagList = append(albumTagList, tag.TagName)
 	}
 
+	//sum of user like this album
+	var likeCount int64
+	if errCount := db.Model(&models.AlbumLike{}).Where("album_id = ?", albumId).Count(&likeCount).Error; errCount != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal Mendapatkan Jumlah Like",
+		})
+	}
+
 	userDetail := UserDetail{
 		UserID: user.ID,
 		FirstName: user.FirstName,
 		LastName: user.LastName,
+		FullName: user.FirstName + " " + user.LastName,
 		Email: user.Email,
 		ProfilePicture: user.ProfilePicture,
 	}
 
 	albumDetail := AlbumDetailRequest{
+		AlbumID: albumRequest.ID,
 		UserID: albumRequest.UserID,
 		UserDetail: userDetail,
 		Description: albumRequest.Description,
 		Tags: albumTagList,
 		Title: albumRequest.Title,
+		LikeCount: int(likeCount),
+		ImageCount: imageCount,
+		VideoCount: videoCount,
 		AlbumPrivacy: albumRequest.AlbumPrivacy,
 		TargetEmail: albumRequest.TargetEmail,
 	}
 
+	var like models.AlbumLike
+	err = db.Where("user_id = ? AND album_id = ?", userID, albumId).First(&like).Error
+
+	wacherHasLike := true
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		wacherHasLike = false
+	} else if err != nil {
+		// Handle error lain (misal DB down, query gagal)
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal memeriksa like"})
+	}
+
+	// lanjut pakai watcherHasLike untuk logika berikutnya
+	fmt.Println("Apakah user sudah like?", wacherHasLike)
 
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
 		"message":       "Record successfully retrieved",
 		"album":         albumDetail,
 		"album_medias":  albumMedias,
+		"user_has_like": wacherHasLike,
 	})
 }
 
@@ -511,9 +829,13 @@ func GetAllAlbums(ctx *fiber.Ctx, db *gorm.DB) error {
 		limit = 10
 	}
 
-	userID := ctx.Params("userID")
+	userID := ctx.Query("user_id")
+
+	fmt.Println("userID query : ", userID)
 
 	userId, errParser := uuid.Parse(userID)
+
+	fmt.Println("QUERY SORT BY : ", sortBy, " PAGE : ", page, " LIMIT : ", limit)
 
 	if errParser != nil {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -602,6 +924,8 @@ func GetAllAlbums(ctx *fiber.Ctx, db *gorm.DB) error {
 		Title string `json:"title"`
 		Description string `json:"description"`
 		MediaCount int `json:"media_count"`
+		ImageCount int `json:"image_count"`
+		VideoCount int `json:"video_count"`
 		ThumbnailURL string `json:"thumbnail_url"`
 		LastUpdate string `json:"last_update"`
 	}
@@ -644,6 +968,8 @@ func GetAllAlbums(ctx *fiber.Ctx, db *gorm.DB) error {
 			Title:      album.Title,
 			Description: album.Description,
 			ThumbnailURL: coverImage,
+			ImageCount: len(album.AlbumImages),
+			VideoCount:  len(album.AlbumVideos),
 			MediaCount: len(album.AlbumImages) + len(album.AlbumVideos),
 			LastUpdate: lastUpdate,
 		})
@@ -662,6 +988,8 @@ func GetAllAlbums(ctx *fiber.Ctx, db *gorm.DB) error {
 
 func GetLatestImage(ctx *fiber.Ctx, db *gorm.DB) error {
 	userID, err := utils.GetUserID(ctx)
+
+	// fmt.Println("INI : ", userID)
 
 	if err != nil {
 		return ctx.SendStatus(fiber.StatusBadRequest)
@@ -750,60 +1078,469 @@ func UploadTemporary(ctx *fiber.Ctx, db *gorm.DB) error {
 	
 }
 
-func UpdateTargetEmail(ctx *fiber.Ctx, db *gorm.DB) error {
-	albumID := ctx.Params("albumId")
-	albumId, errParse := uuid.Parse(albumID)
-
+func UploadMediaAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
+	albumIDParam := ctx.Query("album_id")
+	albumID, errParse := uuid.Parse(albumIDParam)
 	if errParse != nil {
-		return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
-			"message": "Failed to Parse Album ID",
-		})	
-	}
-
-	userId, err := utils.GetUserID(ctx)
-
-	if err != nil {
-		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"message": "Failed retrived User ID",
-		})	
-	}
-
-	var album models.Album
-	if err := db.Where("id = ?", albumId).Where("album_privacy = ?", "restricted").Find(&album).Error; err != nil {
-		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"message": "Failed to retrieved album",
-		})
-	}
-
-	if userId != album.UserID {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"message": "User is not belong to this Album",
+			"error": "album_id tidak valid",
 		})
 	}
 
-	form, formErr := ctx.MultipartForm()
-
-	if formErr != nil {
+	form, errForm := ctx.MultipartForm()
+	if errForm != nil {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"message": "Failed retrived to from form",
+			"error": "Gagal membaca form multipart",
 		})
 	}
 
+	// Upload file (images & videos)
+	images := form.File["album_images"]
+	imageDescriptions := form.Value["image_descriptions"]
 
+	if len(imageDescriptions) != len(images) {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Jumlah deskripsi gambar tidak sesuai jumlah file",
+		})
+	}
 
-	if targetEmails, ok := form.Value["target_emails"]; ok {
-		if marshaled, err := json.Marshal(targetEmails); err == nil {
-			album.TargetEmail = marshaled
+	for index, file := range images {
+		imageDescription := imageDescriptions[index]
+		if err := storeImage(db, file, albumID, imageDescription, nil); err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"message": "Gagal menyimpan gambar",
+				"error":   err.Error(),
+			})
 		}
 	}
 
-	if err := db.Save(&album).Error; err != nil {
-		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal update album"})
+	videos := form.File["album_videos"]
+	videoDescriptions := form.Value["video_descriptions"]
+
+	if len(videoDescriptions) != len(videos) {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Jumlah deskripsi video tidak sesuai jumlah file",
+		})
 	}
-	
+
+	for index, file := range videos {
+		fmt.Println("ada file ? ", file)
+		videoDescription := videoDescriptions[index]
+		fmt.Println("ada deskripsi ? ", videoDescription)
+		if err := storeVideo(db, file, albumID, videoDescription, nil); err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"message": "Gagal menyimpan video",
+				"error":   err.Error(),
+			})
+		}
+	}
+
+	if err := db.Model(&models.Album{}).
+		Where("id = ?", albumID).
+		Update("updated_at", time.Now()).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal mengupdate waktu album",
+		})
+	}
 
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
-		"message": "Target Email Berhasil Diupdate",
-	})	
-	
+		"message": "Media berhasil disimpan",
+	})
+}
+
+
+func UpdateTargetEmail(ctx *fiber.Ctx, db *gorm.DB) error {
+	albumID := ctx.Query("album_id")
+	albumId, err := uuid.Parse(albumID)
+	if err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Album ID tidak valid",
+		})
+	}
+
+	userId, err := utils.GetUserID(ctx)
+	if err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal mengambil User ID",
+		})
+	}
+
+	var album models.Album
+	if errAlbum := db.Where("id = ?", albumId).
+		Where("album_privacy = ?", "restricted").
+		First(&album).Error; errAlbum != nil {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Album tidak ditemukan",
+		})
+	}
+
+	if album.UserID != userId {
+		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "User tidak memiliki akses ke album ini",
+		})
+	}
+
+	// Ambil data email baru
+	type NewTargetEmail struct {
+		Email string `json:"email"`
+	}
+
+	var newEmail NewTargetEmail
+	if errParse := ctx.BodyParser(&newEmail); errParse != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Gagal membaca permintaan email",
+		})
+	}
+
+	// Unmarshal TargetEmail menjadi slice
+	var emailList []string
+	if len(album.TargetEmail) > 0 {
+		if errMarshal := json.Unmarshal(album.TargetEmail, &emailList); errMarshal != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Gagal membaca daftar email sebelumnya",
+			})
+		}
+	}
+
+	// Tambahkan email baru (hindari duplikat jika perlu)
+	emailList = append(emailList, newEmail.Email)
+
+	// Marshal ulang ke json.RawMessage
+	updatedBytes, err := json.Marshal(emailList)
+	if err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal memproses data email",
+		})
+	}
+	album.TargetEmail = updatedBytes
+
+	// Simpan ke DB
+	if err := db.Save(&album).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal menyimpan perubahan email",
+		})
+	}
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message": "Target Email berhasil diperbarui",
+	})
+}
+
+
+
+func ClickLikeMedia(ctx *fiber.Ctx, db *gorm.DB) error {
+	type likeRequest struct {
+		MediaID   string `json:"media_id"`
+		UserID    string `json:"user_id"`
+		MediaType string `json:"media_type"` // "image" or "video"
+	}
+
+	var req likeRequest
+
+	// Parse body
+	if err := ctx.BodyParser(&req); err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Gagal membaca permintaan",
+		})
+	}
+
+	mediaID, err := uuid.Parse(req.MediaID)
+	if err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Media ID tidak valid",
+		})
+	}
+
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "User ID tidak valid",
+		})
+	}
+
+	// Cek apakah sudah pernah like
+	var existing models.MediaLike
+	err = db.Where("user_id = ? AND media_id = ?", userID, mediaID).First(&existing).Error
+
+	if err == nil {
+		// Sudah like → Unlike
+		if req.MediaType == "image" {
+			if err := db.Model(&models.AlbumImage{}).
+				Where("id = ?", mediaID).
+				Update("likes_count", gorm.Expr("likes_count - 1")).Error; err != nil {
+				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengurangi like image"})
+			}
+
+
+		} else if req.MediaType == "video" {
+			if err := db.Model(&models.AlbumVideo{}).
+				Where("id = ?", mediaID).
+				Update("likes_count", gorm.Expr("likes_count - 1")).Error; err != nil {
+				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengurangi like video"})
+			}
+		} else {
+			return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Tipe media tidak valid"})
+		}
+
+		// Hapus record like
+		db.Unscoped().Delete(&existing)
+
+
+		return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+			"message": "Unlike berhasil",
+		})
+	}
+
+	// Belum like → Tambah
+	if req.MediaType == "image" {
+		if err := db.Model(&models.AlbumImage{}).
+			Where("id = ?", mediaID).
+			Update("likes_count", gorm.Expr("likes_count + 1")).Error; err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menambah like image"})
+		}
+	} else if req.MediaType == "video" {
+		if err := db.Model(&models.AlbumVideo{}).
+			Where("id = ?", mediaID).
+			Update("likes_count", gorm.Expr("likes_count + 1")).Error; err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menambah like video"})
+		}
+	} else {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Tipe media tidak valid"})
+	}
+
+	newLike := models.MediaLike{
+		ID:      uuid.New(),
+		UserID:  userID,
+		MediaID: mediaID,
+	}
+
+	if err := db.Create(&newLike).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal menyimpan data like",
+		})
+	}
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message": "Like berhasil",
+	})
+}
+
+
+func ClickLikeAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
+	type likeRequest struct {
+		AlbumID string `json:"album_id"`
+		UserID  string `json:"user_id"`
+	}
+
+	var req likeRequest
+	if err := ctx.BodyParser(&req); err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Gagal membaca data permintaan",
+		})
+	}
+
+	fmt.Println("req : ", req)
+
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "User ID tidak valid",
+		})
+	}
+
+	fmt.Println("album id req : ", req.AlbumID)
+
+	albumID, err := uuid.Parse(req.AlbumID)
+
+	fmt.Println("album id : ", albumID)
+	if err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Album ID tidak valid",
+		})
+	}
+
+	// Cek apakah album ada
+	var album models.Album
+	if errAlbum := db.Preload("AlbumImages").Preload("AlbumVideos").First(&album, albumID).Error; errAlbum != nil {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Album tidak ditemukan",
+		})
+	}
+
+	// Cek apakah user sudah like
+	var existingLike models.AlbumLike
+	err = db.Where("user_id = ? AND album_id = ?", userID, albumID).First(&existingLike).Error
+
+	// Sudah like → unlike
+	if err == nil {
+		// for _, image := range album.AlbumImages {
+		// 	if err := db.Model(&image).Update("likes_count", gorm.Expr("likes_count - 1")).Error; err != nil {
+		// 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengurangi like image"})
+		// 	}
+
+		// 	if err := db.Where("user_id = ? AND media_id = ?", userID, image.ID).Unscoped().Delete(&models.MediaLike{}).Error; err != nil {
+		// 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menghapus like image"})
+		// 	}
+		// }
+
+		// for _, video := range album.AlbumVideos {
+		// 	if err := db.Model(&video).Update("likes_count", gorm.Expr("likes_count - 1")).Error; err != nil {
+		// 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengurangi like video"})
+		// 	}
+
+		// 	if err := db.Where("user_id = ? AND media_id = ?", userID, video.ID).Unscoped().Delete(&models.MediaLike{}).Error; err != nil {
+		// 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menghapus like video"})
+		// 	}
+		// }
+
+		// Hapus record like album
+		db.Delete(&existingLike)
+
+		return ctx.Status(fiber.StatusOK).JSON(fiber.Map{"message": "Unlike berhasil"})
+	}
+
+		// Belum like → like
+
+	// for _, image := range album.AlbumImages {
+	// 	if err := db.Model(&image).Update("likes_count", gorm.Expr("likes_count + 1")).Error; err != nil {
+	// 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menambah like image"})
+	// 	}
+
+	// 	mediaLike := models.MediaLike{
+	// 		UserID:  userID,
+	// 		MediaID: image.ID,
+	// 	}
+
+	// 	var existingMediaLike models.MediaLike
+	// 	if err := db.Where("user_id = ? AND media_id = ?", userID, image.ID).First(&existingMediaLike).Error; err != nil {
+	// 		if errors.Is(err, gorm.ErrRecordNotFound) {
+	// 			// Hanya create kalau belum ada
+	// 			if err := db.Create(&mediaLike).Error; err != nil {
+	// 				return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menambah like image"})
+	// 			}
+	// 		} else {
+	// 			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal cek existing like media"})
+	// 		}
+	// 	}
+
+	// }
+
+	// for _, video := range album.AlbumVideos {
+	// 	if err := db.Model(&video).Update("likes_count", gorm.Expr("likes_count + 1")).Error; err != nil {
+	// 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menambah like video"})
+	// 	}
+
+	// mediaLike := models.MediaLike{
+	// 	UserID:  userID,
+	// 	MediaID: video.ID,
+	// }
+
+	// if err := db.Create(&mediaLike).Error; err != nil {
+	// 	return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menambah like video"})
+	// }
+// }
+
+	newLike := models.AlbumLike{
+		ID:      uuid.New(),
+		AlbumID: albumID,
+		UserID:  userID,
+	}
+
+	if err := db.Create(&newLike).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menyimpan data like"})
+	}
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message": "Like berhasil",
+	})
+}
+
+
+func GetAlbumComments(ctx *fiber.Ctx, db *gorm.DB) error {
+	albumIDParam := ctx.Query("album_id")
+	fmt.Println("album_id : ", albumIDParam)
+	if albumIDParam == "" {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Album ID harus disertakan"})
+	}
+
+	albumID, err := uuid.Parse(albumIDParam)
+	if err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Album ID tidak valid"})
+	}
+
+	var comments []models.AlbumComment
+	if err := db.Preload("User").Where("album_id = ?", albumID).Order("created_at desc").Find(&comments).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengambil komentar"})
+	}
+
+	var response []AlbumCommentResponse
+	for _, comment := range comments {
+		response = append(response, AlbumCommentResponse{
+			ID:        comment.ID,
+			AlbumID:   comment.AlbumID,
+			UserID:    comment.UserID,
+			User:      fmt.Sprintf("%s %s", comment.User.FirstName, comment.User.LastName),
+			UserAvatar:	comment.User.ProfilePicture,
+			Comment:   comment.Comment,
+			CreatedAt: comment.CreatedAt.Format("02 Jan 2006 15:04"),
+		})
+	}
+
+	return ctx.JSON(fiber.Map{
+		"message": "Komen Berhasil Diambil",
+		"album_id": albumID,
+		"comments": response,
+	})
+}
+
+func PostAlbumComment(ctx *fiber.Ctx, db *gorm.DB) error {
+	type requestBody struct {
+		AlbumID string `json:"album_id"`
+		UserID  string `json:"user_id"`
+		Comment string `json:"comment"`
+	}
+
+	var req requestBody
+	if err := ctx.BodyParser(&req); err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Format permintaan tidak valid"})
+	}
+
+	albumID, err := uuid.Parse(req.AlbumID)
+	if err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Album ID tidak valid"})
+	}
+
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "User ID tidak valid"})
+	}
+
+	// Cek apakah album ada
+	var album models.Album
+	if err := db.First(&album, "id = ?", albumID).Error; err != nil {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Album tidak ditemukan"})
+	}
+
+	// Cek apakah user ada
+	var user models.User
+	if err := db.First(&user, "id = ?", userID).Error; err != nil {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "User tidak ditemukan"})
+	}
+
+	// Simpan komentar
+	comment := models.AlbumComment{
+		ID:      uuid.New(),
+		AlbumID: albumID,
+		UserID:  userID,
+		Comment: req.Comment,
+	}
+
+	if err := db.Create(&comment).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menyimpan komentar"})
+	}
+
+	return ctx.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"message": "Komentar berhasil ditambahkan",
+		"data":    comment,
+	})
 }
