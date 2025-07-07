@@ -1,18 +1,26 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image/png"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Zackly23/queue-app/models"
 	notif "github.com/Zackly23/queue-app/proto/notificationpb"
+	"github.com/Zackly23/queue-app/utils"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/pquerna/otp"
+	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 	//godot
@@ -37,19 +45,33 @@ type ForgetPasswordRequest struct {
 	Email	string	`json:"email" validate:"required,email"`
 }
 
+type ChangePasswordRequest struct {
+	RecentPassword	string	`json:"recent_password" validate:"required"`
+	NewPassword     string 	`json:"new_password" validate:"required"`
+}
 
 // Response yang aman
 type UserLoginResponse struct {
 	ID           uuid.UUID   `json:"id"`
 	FirstName    string `json:"first_name"`
 	LastName     string `json:"last_name"`
+	UserName   string `json:"user_name,omitempty"`
 	Email        string `json:"email"`
 	ProfilePicture string `json:"profile_picture,omitempty"`
+	Bio 		 string `json:"bio,omitempty"`
+	Status		string `json:"status"`
+	DeactivateUntil	time.Time `json:"deactivate_until,omitempty"`
 	Address	  string `json:"address,omitempty"`
+	Country       string          `json:"country,omitempty"`
+	City           string          `json:"city,omitempty"`
+	State          string          `json:"state,omitempty"`
+	ZipCode        string          `json:"zip_code,omitempty"`
+	CompanyName    string          `json:"company_name,omitempty" gorm:"type:varchar(100)"`
 	Phone       *string `json:"phone,omitempty"`
+	TagPreference  pq.StringArray  `json:"tag_preferences,omitempty" gorm:"type:text[]"`
 	JobTitle    string `json:"job_title,omitempty"`
+	Subscription string `json:"subscription,omitempty"`
 	SocialMedia json.RawMessage `json:"social_media,omitempty"`
-	AccountConfig models.AccountConfig `json:"account_config,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	
@@ -104,26 +126,40 @@ func Login(ctx *fiber.Ctx, db *gorm.DB) error {
 		})
 	}
 
-	jwtSecret := os.Getenv("JWT_SECRET_KEY")
+	fmt.Println("status : ", user.Status)
 
+	switch user.Status {
+	case "deleted":
+		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"message": "Akun Telah Dihapus Sebelumnya",
+		})
+	case "deactivated":
+		user.Status = "active"
+		user.DeactivateUntil = time.Time{}
+		if err := db.Save(&user).Error; err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Gagal mengupdate status user",
+			})
+		}
+	}
+
+	jwtSecret := os.Getenv("JWT_SECRET_KEY")
 	if jwtSecret == "" {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "JWT_SECRET_KEY belum diset",
 		})
 	}
 
-	// Generate token
 	accessToken, accessTokenErr := generateToken(user, time.Hour*2)
 	refreshToken, refreshTokenErr := generateToken(user, time.Hour*24*7)
 
-	if (accessTokenErr != nil || refreshTokenErr != nil) {
+	if accessTokenErr != nil || refreshTokenErr != nil {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Gagal membuat token",
 		})
 	}
 
-	// Simpan refresh token ke database
-	if err := db.Model(&models.PersonalAccessToken{}).Create(&models.PersonalAccessToken{
+	if err := db.Create(&models.PersonalAccessToken{
 		AccessToken:     accessToken,
 		RefreshToken:    refreshToken,
 		UserID:          user.ID,
@@ -137,29 +173,42 @@ func Login(ctx *fiber.Ctx, db *gorm.DB) error {
 		})
 	}
 
-	// Response aman
 	res := UserLoginResponse{
-		ID:           user.ID,
-		FirstName:    user.FirstName,
-		LastName:     user.LastName,
-		Email:        user.Email,
-		ProfilePicture: user.ProfilePicture,
-		Address: 	user.Address,
-		Phone:       user.Phone,
-		JobTitle:    user.JobTitle,
-		SocialMedia: user.SocialMedia,
-		AccountConfig: user.AccountConfig,
-		CreatedAt:   user.CreatedAt,
-		UpdatedAt:   user.UpdatedAt,
+		ID:              user.ID,
+		FirstName:       user.FirstName,
+		LastName:        user.LastName,
+		Email:           user.Email,
+		ProfilePicture:  user.ProfilePicture,
+		Address:         user.Address,
+		Phone:           user.Phone,
+		JobTitle:        user.JobTitle,
+		Status:          user.Status,
+		DeactivateUntil: user.DeactivateUntil,
+		SocialMedia:     user.SocialMedia,
+		CreatedAt:       user.CreatedAt,
+		UpdatedAt:       user.UpdatedAt,
 	}
 
-	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
-		"message": "Login berhasil",
-		"user":    res,
-		"access_token" : accessToken,
-		"refresh_token" : refreshToken,
+	// Simpan accessToken di body, refreshToken di cookie
+	ctx.Cookie(&fiber.Cookie{
+		Name:     "refresh_token",
+		Value:    refreshToken,
+		Expires:  time.Now().Add(time.Hour * 24 * 7),
+		HTTPOnly: true,
+		Secure:   true, // Wajib true jika pakai HTTPS
+		SameSite: "Lax", // Bisa diatur sesuai kebutuhan
 	})
+
+	// response
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message":       "Login berhasil",
+		"user":          res,
+		"access_token":  accessToken, // ini tetap dikirim
+		"refresh_token": refreshToken,
+	})
+
 }
+
 
 
 func SignUp(ctx *fiber.Ctx, db *gorm.DB) error {
@@ -185,7 +234,7 @@ func SignUp(ctx *fiber.Ctx, db *gorm.DB) error {
 	// Cek apakah email sudah terdaftar
 	if err := db.Where("email = ?", req.Email).First(&models.User{}).Error; err == nil {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Email sudah terdaftar",
+			"error": "Email sudah terdaftar Sebelumnya",
 		})
 	}
 
@@ -210,6 +259,7 @@ func SignUp(ctx *fiber.Ctx, db *gorm.DB) error {
 		FirstName:   req.FirstName,
 		LastName:    req.LastName,
 		Password:    string(hashedPassword),
+		Status: "active",
 	}
 
 	if err := db.Create(&user).Error; err != nil {
@@ -217,6 +267,24 @@ func SignUp(ctx *fiber.Ctx, db *gorm.DB) error {
 			"error": "Gagal menyimpan user",
 		})
 	}
+
+	fmt.Println("User created with ID:", user.ID)
+	// Simpan konfigurasi akun default
+	
+
+	accountConfigs := models.AccountConfig{
+		UserID:              user.ID,
+		IsTwoFactorEnabled: false,
+		TwoFactorAuthMethod: "",
+		TwoFactorAuthDevice: "",
+	}
+
+	if err := db.Create(&accountConfigs).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal menyimpan konfigurasi akun",
+		})
+	}
+
 	
 	return ctx.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"message": "User berhasil dibuat",
@@ -335,10 +403,10 @@ func ResetPassword(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationService
 	//kirim sebuah email ke pengguna berdasarkan emailnya
 	res, err := client.SendNotification(ctxTime, &notif.NotificationRequest{
 		To:      req.Email,
-		Subject: "Permintaan Reset Password",
+		Subject: "Permintaan Change Password",
 		Type:   "password-reset",
 		Name:   user.FirstName + " " + user.LastName,
-		Body:    fmt.Sprintf("Klik link berikut untuk reset password: http://localhost:3000/reset-password?email=%s", req.Email),
+		Body:    fmt.Sprintf("Klik link berikut untuk reset password: http://localhost:3000/change-password?email=%s", req.Email),
 	})
 
 	if err != nil {
@@ -350,4 +418,285 @@ func ResetPassword(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationService
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
 		"message" : "Permintaan Reset Password Sudah Dikirimkan ke Email Pengguna " + res.GetMessage(),
 	})
+}
+
+func ChangePassword(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClient) error {
+	var req ChangePasswordRequest
+	var user models.User
+
+	userID, errID := utils.GetUserID(ctx)
+
+	fmt.Println("user id : ", userID)
+
+	if errID != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error" : "Error mendapatkan user ID",
+		})
+	}
+	
+	if err := ctx.BodyParser(&req); err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error" : "response email tidak ada",
+		})
+	}
+
+	//cek ke database ada ga emailnya
+	if err := db.Where("id = ?", userID).First(&user).Error; err != nil {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Akun Tidak Ditemukan",
+		})
+
+	}
+
+
+
+	// Check if recent password matches the current password in DB
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.RecentPassword)); err != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Password lama salah",
+		})
+	}
+
+	// Hash the new password
+	hashedPassword, errHash := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if errHash != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal meng-hash password baru",
+		})
+	}
+
+	// Update the user's password in the database
+	if err := db.Model(&user).Update("password", string(hashedPassword)).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal memperbarui password",
+		})
+	}
+	ctxTime, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	//kirim sebuah email ke pengguna berdasarkan emailnya
+	fmt.Println("user s : ", user)
+
+	fmt.Println("email : ", user.Email)
+
+
+	res, err := client.SendNotification(ctxTime, &notif.NotificationRequest{
+		To:      user.Email,
+		Subject: "Permintaan Change Password",
+		Type:   "password-reset",
+		Name:   user.FirstName + " " + user.LastName,
+		Body:    fmt.Sprintf("Klik link berikut untuk reset password: http://localhost:3000/reset-password?email=%s", user.Email),
+	})
+
+	if err != nil {
+		fmt.Printf("gRPC error: %v", err)
+		return ctx.Status(500).JSON(fiber.Map{"error": "Gagal mengirim email"})
+	}
+
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message" : "Permintaan Reset Password Sudah Dikirimkan ke Email Pengguna " + res.GetMessage(),
+	})
+}
+
+func DeactivateAccount(ctx *fiber.Ctx, db *gorm.DB) error {
+	userID, errID := utils.GetUserID(ctx)
+
+	fmt.Println("user id : ", userID)
+
+	if errID != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error" : "Error mendapatkan user ID",
+		})
+	}
+
+	var user models.User
+	if err := db.First(&user, userID).Error; err != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"message": "Akun tidak ditemukan",
+		})
+	}
+
+	user.Status = "deactivated"
+
+	user.DeactivateUntil = time.Now().AddDate(0, 0, 30) // add 30 days
+
+	if err := db.Save(&user).Error; err != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"message": "Gagal Menyimpan Status",
+		})
+	}
+
+	// Hapus token dari database
+	if err := db.Model(&models.PersonalAccessToken{}).Where("user_id = ?", userID).Delete(&models.PersonalAccessToken{}).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal menghapus token",
+		})
+	}
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message" : "Permintaan Deactivate Akun Sudah Ditindak Lanjuti ",
+	})
+}
+
+func DeleteAccount(ctx *fiber.Ctx, db *gorm.DB) error {
+	userID, errID := utils.GetUserID(ctx)
+
+	fmt.Println("user id : ", userID)
+
+	if errID != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error" : "Error mendapatkan user ID",
+		})
+	}
+
+	var user models.User
+	if err := db.First(&user, userID).Error; err != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"message": "Akun tidak ditemukan",
+		})
+	}
+
+		// Hapus token dari database
+	if err := db.Model(&models.PersonalAccessToken{}).Where("user_id = ?", userID).Delete(&models.PersonalAccessToken{}).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal menghapus token",
+		})
+	}
+
+	user.Status = "deleted"
+
+	if err := db.Save(&user).Error; err != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"message": "Gagal Menyimpan Status",
+		})
+	}
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message" : "Permintaan Deactivate Akun Sudah Ditindak Lanjuti ",
+	})
+}
+
+func GenerateTOTP(ctx *fiber.Ctx, db *gorm.DB) error {
+	userID, err := utils.GetUserID(ctx)
+	if err != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
+	}
+
+	var user models.User
+	if errAcc := db.Preload("AccountConfig").Where("id = ?", userID).First(&user).Error; errAcc != nil {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "User tidak ditemukan"})
+	}
+
+	// Jangan regenerate kalau sudah punya secret
+	if user.AccountConfig.SecretTOTP != "" {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "TOTP sudah diinisialisasi",
+		})
+	}
+
+	// Generate new secret
+	// secret := otp.NewKeyFromURL(fmt.Sprintf("otpauth://totp/%s:%s?secret=%s&issuer=%s", 
+	// 	os.Getenv("APP_NAME"), user.Email, otp.RandomSecret(10), os.Getenv("APP_NAME")))
+
+		// Generate TOTP key
+	key, err := totp.Generate(totp.GenerateOpts{
+		Issuer:      os.Getenv("APP_NAME"),
+		AccountName: user.Email,
+	})
+	if err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal generate TOTP"})
+	}
+
+	// Ambil secret-nya langsung
+	secret := key.Secret()
+
+	// Simpan ke DB
+	if err := db.Model(&models.AccountConfig{}).
+		Where("user_id = ?", userID).
+		Update("secret_totp", secret).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menyimpan secret ke database"})
+	}
+
+	// Generate QR image
+	img, err := key.Image(200, 200)
+	if err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal generate QR"})
+	}
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal encode QR"})
+	}
+	qrBase64 := base64.StdEncoding.EncodeToString(buf.Bytes())
+
+	// Kirim secret yang sudah pasti disimpan
+	return ctx.JSON(fiber.Map{
+		"secret":    secret,
+		"otp_url":   key.URL(),
+		"qr_base64": qrBase64,
+	})
+
+}
+
+
+
+func VerifyTOTP(ctx *fiber.Ctx, db *gorm.DB) error {
+	type TOTPVerifyRequest struct {
+		Code string `json:"code"`
+	}
+
+	userID, err := utils.GetUserID(ctx)
+	if err != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
+	}
+
+	var req TOTPVerifyRequest
+	if err := ctx.BodyParser(&req); err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Input tidak valid"})
+	}
+
+	var accountConfig models.AccountConfig
+	if err := db.Where("user_id = ?", userID).First(&accountConfig).Error; err != nil {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Data konfigurasi tidak ditemukan"})
+	}
+
+	secret := strings.TrimSpace(accountConfig.SecretTOTP)
+	code := strings.TrimSpace(req.Code)
+
+	if secret == "" {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Secret belum tersedia"})
+	}
+
+	// Debug opsional
+	// codeExpected, _ := totp.GenerateCode(secret, time.Now())
+	// fmt.Println("Expected code:", codeExpected)
+
+	codeNow, _ := totp.GenerateCode(secret, time.Now())
+
+	fmt.Println("code : ", code, " code now : ", codeNow)
+
+	valid, errValid := totp.ValidateCustom(code, secret, time.Now(), totp.ValidateOpts{
+		Period:    30,
+		Skew:      3,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+
+	if errValid != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Kode OTP Tidak Valid"})
+	}
+
+	if !valid {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Kode OTP salah"})
+	}
+
+	// Setel status 2FA aktif
+	accountConfig.IsTwoFactorEnabled = true
+	accountConfig.TwoFactorAuthMethod = "totp"
+	if err := db.Save(&accountConfig).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengaktifkan 2FA"})
+	}
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{"message": "TOTP berhasil diverifikasi"})
 }

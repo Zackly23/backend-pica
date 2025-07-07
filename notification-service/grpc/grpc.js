@@ -27,10 +27,21 @@ async function sendNotification(call, callback) {
     name: name,
   });
 
+  let user
+
   try {
-    const user = await prisma.user.findUnique({
+    user = await prisma.user.findUnique({
       where: { email: to },
     });
+
+    if (!user) {
+      user = await prisma.user.create({
+      data: {
+        email: to,
+        name: name
+      }
+      });
+    }
 
     console.log('user : ', user);
 

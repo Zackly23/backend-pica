@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Zackly23/queue-app/models"
+	"github.com/Zackly23/queue-app/utils"
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -24,7 +25,9 @@ type UserUpdateRequest struct {
 	Address       string          `json:"address,omitempty" gorm:"type:varchar(255)" validate:"max=255"`
 	JobTitle      string          `json:"job_title,omitempty" gorm:"type:varchar(100)" validate:"max=100"`
 	State         string          `json:"state,omitempty" gorm:"type:varchar(50)" validate:"max=50"`
-	ZipCode       string          `json:"zip_code,omitempty" gorm:"type:varchar(20)" validate:"max=20,numeric"`
+	ZipCode       string          `json:"zip_code,omitempty" gorm:"type:varchar(20)" validate:"max=20"`
+	Country       string          `json:"country,omitempty"`
+	City          string          `json:"city,omitempty" gorm:"type:varchar(100)" validate:"max=100"`
 	CompanyName   string          `json:"company_name,omitempty" gorm:"type:varchar(100)" validate:"max=100"`
 	SocialMedia   json.RawMessage `json:"social_media,omitempty" gorm:"type:jsonb" validate:"omitempty,json"`
 }
@@ -52,7 +55,7 @@ func GetUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 	})
 	}
 
-	if err := db.First(&user, userID).Error; err != nil {
+	if err := db.Preload("AccountConfig").First(&user, userID).Error; err != nil {
 		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error": "User not found",
 		})
@@ -69,12 +72,12 @@ func GetUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 		})
 	}
 
-	fmt.Println("ada ga :" ,albums)
+	// fmt.Println("ada ga :" ,albums)
 
 	// Loop through albums
 	for _, album := range albums {
 
-		fmt.Println(album.Title)
+		// fmt.Println(album.Title)
 		// Count media
 		userStats.MediaCount += len(album.AlbumImages) + len(album.AlbumVideos)
 
@@ -101,25 +104,59 @@ func GetUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 		userStats.StoragePercentage = int(float64(userStats.StorageUsed) / float64(userStats.StorageCapacity) * 100)
 	}
 
+
 	response := UserLoginResponse{
 		ID:             user.ID,
 		FirstName:      user.FirstName,
 		LastName:       user.LastName,
+		UserName:       user.UserName,
+		Country: 	 user.Country,
+		City:           user.City,
+		State:          user.State,
+		ZipCode:        user.ZipCode,
+		CompanyName:    user.CompanyName,
+		Bio: 		  	user.Bio,
 		Email:          user.Email,
 		ProfilePicture: user.ProfilePicture,
 		Address:        user.Address,
 		Phone:          user.Phone,
 		JobTitle:       user.JobTitle,
 		SocialMedia:    user.SocialMedia,
-		AccountConfig:  user.AccountConfig,
+		Subscription:  user.Subscription,
+		TagPreference: user.TagPreference,
 		CreatedAt:      user.CreatedAt,
 		UpdatedAt:      user.UpdatedAt,
 	}
 
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
-		"media count" : userStats,
+		"media_count" : userStats,
 		"user":    response,
 		"message": "User data retrieved successfully",
+	})
+}
+
+func GetUserConfiguration(ctx *fiber.Ctx, db *gorm.DB) error {
+	userID, err := utils.GetUserID(ctx)
+
+	if err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to retrieve User Id",
+		})
+	}
+	
+	var accountConfig models.AccountConfig
+
+	if err := db.Where("user_id = ?", userID).First(&accountConfig).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to retrieve account config",
+		})
+	}
+
+	// fmt.Println("accont confug : ", accountConfig)
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message": "Berhasil Mengambil Data Configuration",
+		"account_config": accountConfig,
 	})
 }
 
@@ -150,12 +187,16 @@ func UpdateUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 		})
 	}
 
+	// fmt.Println("ini body nya : ", req)
+
 	// 3. Validasi input
 	if err := validate.Struct(req); err != nil {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": err.Error(),
 		})
 	}
+
+	// fmt.Println("Ini udah di validate : ", req.JobTitle)
 
 	// 4. Mapping field-field dari request ke user model
 	existingUser.FirstName = strings.SplitN(req.FullName, " ", 2)[0]
@@ -177,6 +218,9 @@ func UpdateUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 	existingUser.ZipCode = req.ZipCode
 	existingUser.CompanyName = req.CompanyName
 	existingUser.SocialMedia = req.SocialMedia
+	existingUser.UserName = req.UserName
+	existingUser.Country = req.Country
+	existingUser.City = req.City
 
 	// 5. Simpan perubahan ke DB
 	if err := db.Save(&existingUser).Error; err != nil {
@@ -194,7 +238,15 @@ func UpdateUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 
 func UpdateProfilePicture(ctx *fiber.Ctx, db *gorm.DB) error {
 	var user models.User
-	userID := ctx.Params("userId")
+	// userID := ctx.Params("userId")
+	userID, errID := utils.GetUserID(ctx)
+
+	if errID != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Error retrieced User ID",
+		})
+	}
+
 	form, errForm := ctx.FormFile("profile_picture")
 
 	if errForm != nil {

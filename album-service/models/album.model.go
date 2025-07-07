@@ -55,6 +55,7 @@ type Album struct {
 	AlbumPrivacy string          `json:"album_privacy"`
 	AlbumImages  []AlbumImage    `gorm:"foreignKey:AlbumID" json:"album_images,omitempty"`
 	AlbumVideos  []AlbumVideo    `gorm:"foreignKey:AlbumID" json:"album_videos,omitempty"`
+	Comments	 []AlbumComment  `gorm:"foreignKey:AlbumID" json:"album_comments,omitempty"`
 	TargetEmail  json.RawMessage `gorm:"type:jsonb" json:"target_email,omitempty"`
 	CreatedAt    time.Time       `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt    time.Time       `gorm:"autoUpdateTime" json:"updated_at"`
@@ -67,6 +68,41 @@ type TempMedia struct {
 	LikeCount int            `gorm:"default:0" json:"like_count"`
 	ExpiredAt time.Time      `json:"expired_at"`
 	IPAddress string         `json:"ip_address"`
+	CreatedAt time.Time      `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt time.Time      `gorm:"autoUpdateTime" json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
+}
+
+
+type AlbumLike struct {
+	ID        uuid.UUID      `json:"id" gorm:"type:uuid;default:uuid_generate_v4();primaryKey"`
+	AlbumID   uuid.UUID `json:"album_id" gorm:"type:uuid;not null;index"`
+	Album     Album     `gorm:"foreignKey:AlbumID;references:ID" json:"album,omitempty"`
+	UserID    uuid.UUID `json:"user_id" gorm:"type:uuid;not null;index"`
+	User      User      `gorm:"foreignKey:UserID;references:ID" json:"user,omitempty"`
+	CreatedAt time.Time      `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt time.Time      `gorm:"autoUpdateTime" json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
+}
+
+
+type MediaLike struct {
+	ID        uuid.UUID      `json:"id" gorm:"type:uuid;default:uuid_generate_v4();primaryKey"`
+	MediaID   uuid.UUID      `json:"media_id" gorm:"type:uuid;not null;index:idx_user_media,unique"`
+	UserID    uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index:idx_user_media,unique"`
+	User      User           `gorm:"foreignKey:UserID;references:ID" json:"user,omitempty"`
+	CreatedAt time.Time      `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt time.Time      `gorm:"autoUpdateTime" json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
+}
+
+type AlbumComment struct {
+	ID        uuid.UUID      `json:"id" gorm:"type:uuid;default:uuid_generate_v4();primaryKey"`
+	AlbumID   uuid.UUID      `json:"album_id" gorm:"type:uuid;not null;index"`
+	Album     Album          `gorm:"foreignKey:AlbumID;references:ID" json:"album,omitempty"`
+	UserID    uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	User      User           `gorm:"foreignKey:UserID;references:ID" json:"user,omitempty"`
+	Comment   string         `json:"comment" gorm:"type:text;not null"`
 	CreatedAt time.Time      `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt time.Time      `gorm:"autoUpdateTime" json:"updated_at"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
