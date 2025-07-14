@@ -1,17 +1,21 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"mime/multipart"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Zackly23/queue-app/models"
+	notif "github.com/Zackly23/queue-app/proto/notificationpb"
 	"github.com/Zackly23/queue-app/utils"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -54,12 +58,12 @@ type AlbumMedia struct {
 
 type AlbumDetailRequest struct {
 	AlbumID      uuid.UUID  	`json:"album_id"`
-	UserID       uuid.UUID          `json:"user_id"`
 	UserDetail	UserDetail    `json:"user_detail"`
 	Tags         []string      `json:"tags,omitempty"`         // array string
 	Title        string        `json:"title"`
 	Description  string        `json:"description,omitempty"`
 	LikeCount	int				`json:"like_count"`
+	ViewCount	int 			`json:"view_count"`
 	ImageCount int `json:"image_count"`
 	VideoCount int `json:"video_count"`
 	AlbumPrivacy string        `json:"album_privacy"`          // e.g. "public", "private"
@@ -286,7 +290,7 @@ func storeTags(form *multipart.Form, db *gorm.DB, album models.Album) error {
 	return nil
 }
 
-func StoreAlbums(ctx *fiber.Ctx, db *gorm.DB) error {
+func StoreAlbums(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClient) error {
 	userID, err := utils.GetUserID(ctx)
 
 	fmt.Println("userID : x ", userID)
@@ -320,6 +324,8 @@ func StoreAlbums(ctx *fiber.Ctx, db *gorm.DB) error {
 			targetEmailRaw = marshaled
 		}
 	}
+
+
 
 	// Simpan Album
 	album := models.Album{
@@ -386,6 +392,41 @@ func StoreAlbums(ctx *fiber.Ctx, db *gorm.DB) error {
 			})
 		}
 	}
+
+	// Send notifications in background
+	go func(album models.Album, emails []string) {
+		var wg sync.WaitGroup
+
+		for _, email := range emails {
+			wg.Add(1)
+			go func(album models.Album, email string) {
+				defer wg.Done()
+
+				ctxNotif, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+
+				_, err := client.SendNotification(ctxNotif, &notif.NotificationRequest{
+					To:      email,
+					Subject: "Anda Telah Ditambahkan ke Album",
+					Type:    "album-invitation",
+					Name:    email,
+					Body:    fmt.Sprintf("Klik link berikut untuk melihat album: http://localhost:5173/album-share?email=%s", email),
+					Metadata: map[string]string{
+						"album_name": album.Title,
+						"album_url" : fmt.Sprintf("http://localhost:5173/albums/=%s/details", album.ID),
+						"platform_name": "PixoVaulty",
+						"platform_url": "www.pixovaulty.com",
+					},
+				})
+				if err != nil {
+					log.Printf("Gagal mengirim notifikasi ke %s: %v", email, err)
+				}
+			}(album, email)
+		}
+
+		wg.Wait()
+	}(album, targetEmailJSON)
+
 
 	return ctx.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"message": "Album berhasil disimpan",
@@ -603,7 +644,7 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 	}
 
 	var albumRequest models.Album
-	if errAlbum := db.Preload("Tags").Preload("AlbumImages").Preload("AlbumVideos").Where("id = ?", albumId).First(&albumRequest).Error; errAlbum != nil {
+	if errAlbum := db.Preload("Tags").Preload("AlbumImages").Preload("AlbumVideos").Preload("User").Where("id = ?", albumId).First(&albumRequest).Error; errAlbum != nil {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Album Tidak Ditemukan"})
 	}
 
@@ -615,35 +656,45 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 
 	switch albumRequest.AlbumPrivacy {
 	case "restricted":
+		// Jika user adalah pemilik album, izinkan langsung
+		if user.ID == albumRequest.UserID {
+			break
+		}
+
 		var allowedEmails []string
-		if errCheck := json.Unmarshal(albumRequest.TargetEmail, &allowedEmails); errCheck != nil {
+		if errEmail := json.Unmarshal(albumRequest.TargetEmail, &allowedEmails); errEmail != nil {
 			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": "Gagal Mendapatkan Target Email",
 			})
 		}
 
 		// Cek apakah email user ada di daftar allowedEmails
-		allowed := false
+		isAllowed := false
 		for _, email := range allowedEmails {
 			if email == user.Email {
-				allowed = true
+				isAllowed = true
 				break
 			}
 		}
 
-		if !allowed {
+		if !isAllowed {
 			return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{
-				"error": "User Tidak Diperbolehkan Melihat Album",
+				"error": "User tidak diperbolehkan melihat album",
 			})
 		}
 
 	case "public":
-		// Tidak ada batasan, lanjut
+		// Tidak ada batasan akses
 	case "private":
+		// Jika user adalah pemilik album, izinkan
+		if user.ID == albumRequest.UserID {
+			break
+		}
 		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error": "User Tidak Diperbolehkan Melihat Album",
+			"error": "User tidak diperbolehkan melihat album",
 		})
 	}
+
 
 		
 	var albumMedias []AlbumMedia
@@ -771,22 +822,22 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 	}
 
 	userDetail := UserDetail{
-		UserID: user.ID,
-		FirstName: user.FirstName,
-		LastName: user.LastName,
-		FullName: user.FirstName + " " + user.LastName,
-		Email: user.Email,
-		ProfilePicture: user.ProfilePicture,
+		UserID: albumRequest.User.ID,
+		FirstName: albumRequest.User.FirstName,
+		LastName: albumRequest.User.LastName,
+		FullName: albumRequest.User.FirstName + " " + albumRequest.User.LastName,
+		Email: albumRequest.User.Email,
+		ProfilePicture: albumRequest.User.ProfilePicture,
 	}
 
 	albumDetail := AlbumDetailRequest{
 		AlbumID: albumRequest.ID,
-		UserID: albumRequest.UserID,
 		UserDetail: userDetail,
 		Description: albumRequest.Description,
 		Tags: albumTagList,
 		Title: albumRequest.Title,
 		LikeCount: int(likeCount),
+		ViewCount: int(albumRequest.ViewCount),
 		ImageCount: imageCount,
 		VideoCount: videoCount,
 		AlbumPrivacy: albumRequest.AlbumPrivacy,
@@ -807,13 +858,101 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 	// lanjut pakai watcherHasLike untuk logika berikutnya
 	fmt.Println("Apakah user sudah like?", wacherHasLike)
 
+	if err := db.Model(&albumRequest).UpdateColumn("view_count", gorm.Expr("view_count + ?", 1)).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal update view count",
+		})
+	}
+
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
 		"message":       "Record successfully retrieved",
 		"album":         albumDetail,
 		"album_medias":  albumMedias,
 		"user_has_like": wacherHasLike,
+		"user_login_id": user.ID,
 	})
 }
+
+func DeleteAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
+	albumID := ctx.Params("albumID")
+
+	albumId, errParser := uuid.Parse(albumID)
+
+	fmt.Println("album id = ? ", albumID)
+
+	if errParser != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Error Parsing to UUID",
+		})
+	}
+
+
+	userLoginID, errUserLogin := utils.GetUserID(ctx)
+	if errUserLogin != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "User is unauthorized",
+		})
+	}
+
+		fmt.Print("albumID : ", albumID, "  user ID ", userLoginID)
+
+
+	var album models.Album
+	if err := db.Preload("AlbumVideos").
+		Preload("AlbumImages").
+		Preload("Comments").
+		Where("id = ? AND user_id = ?", albumId, userLoginID).
+		First(&album).Error; err != nil {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Album tidak ditemukan atau Anda bukan pemilik",
+		})
+	}
+
+	// Hapus semua gambar terkait
+	for _, image := range album.AlbumImages {
+		if err := deleteImage(db, image.ID); err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": fmt.Sprintf("Gagal menghapus image %s", image.ID),
+			})
+		}
+	}
+
+	// Hapus semua video terkait
+	for _, video := range album.AlbumVideos {
+		if err := deleteVideo(db, video.ID); err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": fmt.Sprintf("Gagal menghapus video %s", video.ID),
+			})
+		}
+	}
+
+	// Hapus semua komentar
+	for _, comment := range album.Comments {
+		if err := db.Delete(&comment).Error; err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": fmt.Sprintf("Gagal menghapus komentar %s", comment.ID),
+			})
+		}
+	}
+
+	// Hapus relasi many-to-many (misal: album_tags)
+	if err := db.Model(&album).Association("Tags").Clear(); err != nil {
+		// Hanya log jika ada error (jika kamu memang punya relasi Tags)
+		log.Println("Gagal menghapus relasi tags:", err)
+	}
+
+	// Hapus album-nya
+	if err := db.Delete(&album).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal menghapus album",
+		})
+	}
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message": "Album berhasil dihapus",
+	})
+}
+
 
 
 func GetAllAlbums(ctx *fiber.Ctx, db *gorm.DB) error {
@@ -1149,16 +1288,17 @@ func UploadMediaAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 }
 
 
-func UpdateTargetEmail(ctx *fiber.Ctx, db *gorm.DB) error {
-	albumID := ctx.Query("album_id")
-	albumId, err := uuid.Parse(albumID)
+func UpdateTargetEmail(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClient) error {
+	albumID := ctx.Params("albumId")
+
+	albumUUID, err := uuid.Parse(albumID)
 	if err != nil {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Album ID tidak valid",
 		})
 	}
 
-	userId, err := utils.GetUserID(ctx)
+	userID, err := utils.GetUserID(ctx)
 	if err != nil {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Gagal mengambil User ID",
@@ -1166,65 +1306,86 @@ func UpdateTargetEmail(ctx *fiber.Ctx, db *gorm.DB) error {
 	}
 
 	var album models.Album
-	if errAlbum := db.Where("id = ?", albumId).
+	if errALbum := db.Where("id = ?", albumUUID).
 		Where("album_privacy = ?", "restricted").
-		First(&album).Error; errAlbum != nil {
+		First(&album).Error; errALbum != nil {
 		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error": "Album tidak ditemukan",
 		})
 	}
 
-	if album.UserID != userId {
+	if album.UserID != userID {
 		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{
 			"error": "User tidak memiliki akses ke album ini",
 		})
 	}
 
-	// Ambil data email baru
+	// Ambil data email baru dari body
 	type NewTargetEmail struct {
 		Email string `json:"email"`
 	}
-
 	var newEmail NewTargetEmail
-	if errParse := ctx.BodyParser(&newEmail); errParse != nil {
+	if errBodyParser := ctx.BodyParser(&newEmail); errBodyParser != nil {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Gagal membaca permintaan email",
 		})
 	}
 
-	// Unmarshal TargetEmail menjadi slice
+	// Decode daftar email saat ini dari album
 	var emailList []string
 	if len(album.TargetEmail) > 0 {
-		if errMarshal := json.Unmarshal(album.TargetEmail, &emailList); errMarshal != nil {
+		if errUnMarshal := json.Unmarshal(album.TargetEmail, &emailList); errUnMarshal != nil {
 			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": "Gagal membaca daftar email sebelumnya",
 			})
 		}
 	}
 
-	// Tambahkan email baru (hindari duplikat jika perlu)
+	// Tambahkan email baru jika belum ada
 	emailList = append(emailList, newEmail.Email)
-
-	// Marshal ulang ke json.RawMessage
-	updatedBytes, err := json.Marshal(emailList)
+	updatedJSON, err := json.Marshal(emailList)
 	if err != nil {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Gagal memproses data email",
 		})
 	}
-	album.TargetEmail = updatedBytes
 
-	// Simpan ke DB
+	album.TargetEmail = updatedJSON
 	if err := db.Save(&album).Error; err != nil {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Gagal menyimpan perubahan email",
 		})
 	}
 
+	// 🔄 Kirim notifikasi lewat gRPC di background
+	go func(album models.Album, email string, client notif.NotificationServiceClient) {
+		ctxNotif, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := client.SendNotification(ctxNotif, &notif.NotificationRequest{
+			To:      email,
+			Subject: "Anda Telah Ditambahkan ke Album",
+			Type:    "album-invitation",
+			Name:    email,
+			Body:    "Anda telah diberi akses ke album. Silakan buka aplikasi untuk melihatnya.",
+			Metadata: map[string]string{
+				"album_name": album.Title,
+				"album_url" : fmt.Sprintf("http://localhost:5173/albums/=%s/details", album.ID),
+				"platform_name": "PixoVaulty",
+				"platform_url": "www.pixovaulty.com",
+			},
+		})
+
+		if err != nil {
+			log.Printf("Gagal mengirim notifikasi ke %s: %v", email, err)
+		}
+	}(album, newEmail.Email, client)
+
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
-		"message": "Target Email berhasil diperbarui",
+		"message": "Target Email berhasil diperbarui dan notifikasi dikirim",
 	})
 }
+
 
 
 
@@ -1544,3 +1705,124 @@ func PostAlbumComment(ctx *fiber.Ctx, db *gorm.DB) error {
 		"data":    comment,
 	})
 }
+
+
+func GetAlbumFollower(ctx *fiber.Ctx, db *gorm.DB) error {
+	userID, errUserID := utils.GetUserID(ctx)
+	if errUserID != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Unauthorized",
+		})
+	}
+
+	var userLogin models.User
+	if err := db.Preload("Following").Where("id = ?", userID).First(&userLogin).Error; err != nil {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "User not found",
+		})
+	}
+
+	var userIDFollowing []uuid.UUID
+	for _, follow := range userLogin.Following {
+		userIDFollowing = append(userIDFollowing, follow.FollowingID)
+	}
+
+	if len(userIDFollowing) == 0 {
+		return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+			"albums": []interface{}{},
+		})
+	}
+
+	var albums []models.Album
+	if err := db.Preload("AlbumImages").
+		Preload("AlbumVideos").Preload("User").
+		Where("user_id IN ?", userIDFollowing).
+		Where("album_privacy != ?", "private").
+		Order("updated_at DESC").
+		Find(&albums).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to retrieve albums",
+		})
+	}
+
+	type AlbumWithLastUpdate struct {
+		AlbumID      uuid.UUID `json:"album_id"`
+		Title        string    `json:"title"`
+		Description  string    `json:"description"`
+		MediaCount   int       `json:"media_count"`
+		ImageCount   int       `json:"image_count"`
+		VideoCount   int       `json:"video_count"`
+		ThumbnailURL string    `json:"thumbnail_url"`
+		LastUpdate   string    `json:"last_update"`
+		UserDetail	UserDetail	`json:"user_detail,omitempty"`
+	}
+
+	var albumsWithLastUpdate []AlbumWithLastUpdate
+	now := time.Now()
+
+	for _, album := range albums {
+		diff := now.Sub(album.UpdatedAt)
+		var lastUpdate string
+		switch {
+		case diff < time.Hour:
+			lastUpdate = "just now"
+		case diff < 24*time.Hour:
+			lastUpdate = fmt.Sprintf("%d hours ago", int(diff.Hours()))
+		case diff < 7*24*time.Hour:
+			lastUpdate = fmt.Sprintf("%d days ago", int(diff.Hours()/24))
+		case diff < 30*24*time.Hour:
+			lastUpdate = fmt.Sprintf("%d weeks ago", int(diff.Hours()/(24*7)))
+		default:
+			lastUpdate = fmt.Sprintf("%d months ago", int(diff.Hours()/(24*30)))
+		}
+
+		// Ambil cover image random
+		coverImage := ""
+		if len(album.AlbumImages) > 0 {
+			randomIdx := time.Now().UnixNano() % int64(len(album.AlbumImages))
+			coverImage = album.AlbumImages[randomIdx].ImageURL
+		}
+
+		if album.AlbumPrivacy == "restricted" {
+			var allowedEmails []string
+			if err := json.Unmarshal(album.TargetEmail, &allowedEmails); err != nil {
+				continue // jika gagal unmarshal, skip
+			}
+
+			isAllowed := false
+			for _, email := range allowedEmails {
+				if email == userLogin.Email {
+					isAllowed = true
+					break
+				}
+			}
+
+			if !isAllowed {
+				continue // skip album ini karena user tidak termasuk
+			}
+		}
+
+		albumsWithLastUpdate = append(albumsWithLastUpdate, AlbumWithLastUpdate{
+			AlbumID:      album.ID,
+			Title:        album.Title,
+			Description:  album.Description,
+			MediaCount:   len(album.AlbumImages) + len(album.AlbumVideos),
+			ImageCount:   len(album.AlbumImages),
+			VideoCount:   len(album.AlbumVideos),
+			ThumbnailURL: coverImage,
+			LastUpdate:   lastUpdate,
+			UserDetail: UserDetail{
+				UserID: album.User.ID,
+				FirstName: album.User.FirstName,
+				LastName: album.User.LastName,
+				FullName: album.User.FirstName + " " + album.User.LastName,
+
+			},
+		})
+	}
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+		"albums": albumsWithLastUpdate,
+	})
+}
+

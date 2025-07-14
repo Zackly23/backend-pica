@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/png"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -61,6 +62,8 @@ type UserLoginResponse struct {
 	Bio 		 string `json:"bio,omitempty"`
 	Status		string `json:"status"`
 	DeactivateUntil	time.Time `json:"deactivate_until,omitempty"`
+	IsTwoFactorEnabled bool `json:"is_two_factor_enabled,omitempty"`
+	AreYouFollowingUser	bool `json:"are_you_following_user"`
 	Address	  string `json:"address,omitempty"`
 	Country       string          `json:"country,omitempty"`
 	City           string          `json:"city,omitempty"`
@@ -184,6 +187,7 @@ func Login(ctx *fiber.Ctx, db *gorm.DB) error {
 		JobTitle:        user.JobTitle,
 		Status:          user.Status,
 		DeactivateUntil: user.DeactivateUntil,
+		IsTwoFactorEnabled: user.AccountConfig.IsTwoFactorEnabled,
 		SocialMedia:     user.SocialMedia,
 		CreatedAt:       user.CreatedAt,
 		UpdatedAt:       user.UpdatedAt,
@@ -211,7 +215,7 @@ func Login(ctx *fiber.Ctx, db *gorm.DB) error {
 
 
 
-func SignUp(ctx *fiber.Ctx, db *gorm.DB) error {
+func SignUp(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClient) error {
 	//get request body
 	var req UserSignUpRequest
 
@@ -253,6 +257,15 @@ func SignUp(ctx *fiber.Ctx, db *gorm.DB) error {
 		})
 	}
 
+	// Get Subscription ID where SubscriptionType = type-1
+	var subscription models.Subscription
+	if err := db.First(&subscription, "subscription_type = ?", "Basic").Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal Mengambil Data Subscription",
+		})
+	}
+
+
 	// Simpan user baru ke database
 	user := models.User{
 		Email:       req.Email,
@@ -260,6 +273,7 @@ func SignUp(ctx *fiber.Ctx, db *gorm.DB) error {
 		LastName:    req.LastName,
 		Password:    string(hashedPassword),
 		Status: "active",
+		SubscriptionID: subscription.ID,
 	}
 
 	if err := db.Create(&user).Error; err != nil {
@@ -271,6 +285,22 @@ func SignUp(ctx *fiber.Ctx, db *gorm.DB) error {
 	fmt.Println("User created with ID:", user.ID)
 	// Simpan konfigurasi akun default
 	
+
+	// Buat record baru untuk riwayat subscription user
+	newUserSubscription := models.UserSubscription{
+		// ID:             uuid.New(),
+		UserID:         user.ID,
+		SubscriptionID: subscription.ID,
+		StartDate: time.Now(),
+		EndDate: time.Now().AddDate(0,0,30),
+	}
+
+	if err := db.Create(&newUserSubscription).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal Menyimpan Riwayat Subscription",
+		})
+	}
+
 
 	accountConfigs := models.AccountConfig{
 		UserID:              user.ID,
@@ -284,6 +314,24 @@ func SignUp(ctx *fiber.Ctx, db *gorm.DB) error {
 			"error": "Gagal menyimpan konfigurasi akun",
 		})
 	}
+
+	// 🔄 Kirim notifikasi lewat gRPC di background
+	go func(user models.User, client notif.NotificationServiceClient) {
+		ctxNotif, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := client.SendNotification(ctxNotif, &notif.NotificationRequest{
+			To:      user.Email,
+			Subject: "Pendaftaran Akun Anda Berhasil",
+			Type:    "account-signup",
+			Name:    user.FirstName + " " + user.LastName,
+			Body:    "Akun Anda berhasil didaftarkan. Silakan login untuk mulai menggunakan aplikasi.",
+		})
+
+		if err != nil {
+			log.Printf("Gagal mengirim notifikasi ke %s: %v", user.Email, err)
+		}
+	}(user, client)
 
 	
 	return ctx.Status(fiber.StatusCreated).JSON(fiber.Map{
@@ -471,31 +519,35 @@ func ChangePassword(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServic
 			"error": "Gagal memperbarui password",
 		})
 	}
-	ctxTime, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
+
 
 	//kirim sebuah email ke pengguna berdasarkan emailnya
 	fmt.Println("user s : ", user)
 
 	fmt.Println("email : ", user.Email)
 
+	go func (user models.User, client notif.NotificationServiceClient)  {
+		ctxTime, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
 
-	res, err := client.SendNotification(ctxTime, &notif.NotificationRequest{
-		To:      user.Email,
-		Subject: "Permintaan Change Password",
-		Type:   "password-reset",
-		Name:   user.FirstName + " " + user.LastName,
-		Body:    fmt.Sprintf("Klik link berikut untuk reset password: http://localhost:3000/reset-password?email=%s", user.Email),
-	})
+		_, err := client.SendNotification(ctxTime, &notif.NotificationRequest{
+			To:      user.Email,
+			Subject: "Permintaan Perubahan Password",
+			Type:   "password-reset",
+			Name:   user.FirstName + " " + user.LastName,
+			Body:    fmt.Sprintf("Klik link berikut untuk reset password: http://localhost:3000/reset-password?email=%s", user.Email),
+		})
 
-	if err != nil {
-		fmt.Printf("gRPC error: %v", err)
-		return ctx.Status(500).JSON(fiber.Map{"error": "Gagal mengirim email"})
-	}
+		if err != nil {
+			log.Printf("Gagal mengirim notifikasi ke %s: %v", user.Email, err)
+			fmt.Println("Gagal GRPC ")
+		}
+
+	} (user, client)
 
 
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
-		"message" : "Permintaan Reset Password Sudah Dikirimkan ke Email Pengguna " + res.GetMessage(),
+		"message" : "Permintaan Reset Password Sudah Dikirimkan ke Email Pengguna ",
 	})
 }
 
@@ -589,7 +641,7 @@ func GenerateTOTP(ctx *fiber.Ctx, db *gorm.DB) error {
 	}
 
 	// Jangan regenerate kalau sudah punya secret
-	if user.AccountConfig.SecretTOTP != "" {
+	if (user.AccountConfig.SecretTOTP != "" && user.AccountConfig.IsTwoFactorEnabled) {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "TOTP sudah diinisialisasi",
 		})
@@ -604,6 +656,7 @@ func GenerateTOTP(ctx *fiber.Ctx, db *gorm.DB) error {
 		Issuer:      os.Getenv("APP_NAME"),
 		AccountName: user.Email,
 	})
+	
 	if err != nil {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal generate TOTP"})
 	}
@@ -612,9 +665,9 @@ func GenerateTOTP(ctx *fiber.Ctx, db *gorm.DB) error {
 	secret := key.Secret()
 
 	// Simpan ke DB
-	if err := db.Model(&models.AccountConfig{}).
+	if errAcc := db.Model(&models.AccountConfig{}).
 		Where("user_id = ?", userID).
-		Update("secret_totp", secret).Error; err != nil {
+		Update("secret_totp", secret).Error; errAcc != nil {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menyimpan secret ke database"})
 	}
 
@@ -641,7 +694,7 @@ func GenerateTOTP(ctx *fiber.Ctx, db *gorm.DB) error {
 
 
 
-func VerifyTOTP(ctx *fiber.Ctx, db *gorm.DB) error {
+func VerifyTOTP(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClient) error {
 	type TOTPVerifyRequest struct {
 		Code string `json:"code"`
 	}
@@ -649,6 +702,97 @@ func VerifyTOTP(ctx *fiber.Ctx, db *gorm.DB) error {
 	userID, err := utils.GetUserID(ctx)
 	if err != nil {
 		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
+	}
+
+	var user models.User
+	if errUser := db.Where("id = ?", userID).First(&user).Error; errUser != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "User Not Found"})
+
+	}
+
+	var req TOTPVerifyRequest
+	if err := ctx.BodyParser(&req); err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Input tidak valid"})
+	}
+
+	var accountConfig models.AccountConfig
+	if err := db.Where("user_id = ?", userID).First(&accountConfig).Error; err != nil {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Data konfigurasi tidak ditemukan"})
+	}
+
+	secret := strings.TrimSpace(accountConfig.SecretTOTP)
+	code := strings.TrimSpace(req.Code)
+
+	if secret == "" {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Secret belum tersedia"})
+	}
+
+	// Debug opsional
+	// codeExpected, _ := totp.GenerateCode(secret, time.Now())
+	// fmt.Println("Expected code:", codeExpected)
+
+	codeNow, _ := totp.GenerateCode(secret, time.Now())
+
+	fmt.Println("code : ", code, " code now : ", codeNow)
+
+	valid, errValid := totp.ValidateCustom(code, secret, time.Now(), totp.ValidateOpts{
+		Period:    30,
+		Skew:      3,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+
+	if errValid != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Kode OTP Tidak Valid"})
+	}
+
+	if !valid {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Kode OTP salah"})
+	}
+
+	
+	// Setel status 2FA aktif
+	accountConfig.IsTwoFactorEnabled = true
+	accountConfig.TwoFactorAuthMethod = "totp"
+	if err := db.Save(&accountConfig).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengaktifkan 2FA"})
+
+	}
+	// 🔄 Kirim notifikasi lewat gRPC di background
+	go func(user models.User, client notif.NotificationServiceClient) {
+		ctxNotif, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := client.SendNotification(ctxNotif, &notif.NotificationRequest{
+			To:      user.Email,
+			Subject: "Two-Factor Authentication Activated",
+			Type:    "two-factor-auth",
+			Name:    user.FirstName + " " + user.LastName,
+			Body:    "Two-factor authentication (TFA) has been successfully enabled for your account.",
+		})
+
+		if err != nil {
+			log.Printf("Failed to send notification to %s: %v", user.Email, err)
+		}
+	}(user, client)
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{"message": "TOTP berhasil diverifikasi"})
+}
+
+func VerifyTFA(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClient) error {
+	type TOTPVerifyRequest struct {
+		Code string `json:"code"`
+	}
+
+	userID, err := utils.GetUserID(ctx)
+	if err != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
+	}
+
+	var user models.User
+	if errUser := db.Where("id = ?", userID).First(&user).Error; errUser != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "User Not Found"})
+
 	}
 
 	var req TOTPVerifyRequest
@@ -692,11 +836,28 @@ func VerifyTOTP(ctx *fiber.Ctx, db *gorm.DB) error {
 	}
 
 	// Setel status 2FA aktif
-	accountConfig.IsTwoFactorEnabled = true
-	accountConfig.TwoFactorAuthMethod = "totp"
-	if err := db.Save(&accountConfig).Error; err != nil {
-		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengaktifkan 2FA"})
-	}
+	// accountConfig.IsTwoFactorEnabled = true
+	// accountConfig.TwoFactorAuthMethod = "totp"
+	// if err := db.Save(&accountConfig).Error; err != nil {
+	// 	return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengaktifkan 2FA"})
+	// }
+
+	go func(user models.User, client notif.NotificationServiceClient) {
+		ctxNotif, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := client.SendNotification(ctxNotif, &notif.NotificationRequest{
+			To:      user.Email,
+			Subject: "Login dengan Two-Factor Authentication",
+			Type:    "two-factor-auth",
+			Name:    user.FirstName + " " + user.LastName,
+			Body:    "Anda berhasil login menggunakan two-factor authentication (TFA). Jika ini bukan Anda, segera amankan akun Anda.",
+		})
+
+		if err != nil {
+			log.Printf("Failed to send notification to %s: %v", user.Email, err)
+		}
+	}(user, client)
 
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{"message": "TOTP berhasil diverifikasi"})
 }

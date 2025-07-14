@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Zackly23/queue-app/models"
+	"github.com/Zackly23/queue-app/seeders"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -64,6 +65,11 @@ func (d *Database) ConnectDatabase() (*gorm.DB, error) {
 	// 	fmt.Println("Failed to Drop models:", err)
 	// 	return nil, err	
 	// }
+
+	//seed sucbsctiption
+	if err := seeders.SeedSubscriptions(db); err != nil {
+		fmt.Println("Gagal Melakukan Seeding")
+	}
 
 	// Auto migrate models
 	if err := db.AutoMigrate(models.GetModels()...); err != nil {

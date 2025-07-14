@@ -2,8 +2,11 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"strings"
+	"time"
 
 	"github.com/Zackly23/queue-app/models"
 	"github.com/Zackly23/queue-app/utils"
@@ -36,14 +39,22 @@ type UserStatResponse struct {
 	MediaCount int `json:"media_count"`
 	FollowersCount int `json:"followers_count"`
 	FollowingCount int `json:"following_count"`
-	StorageUsed int `json:"storage_used"`
-	StorageCapacity int `json:"storage_capacity"`
-	StoragePercentage int `json:"storage_percentage"`
+	StorageUsed string `json:"storage_used"`
+	StorageCapacity string `json:"storage_capacity"`
+	StoragePercentage float64 `json:"storage_percentage"`
 }
 
 var validate = validator.New()
 
 func GetUserData(ctx *fiber.Ctx, db *gorm.DB) error {
+
+	userLoginID, errUserLoginID := utils.GetUserID(ctx)
+	if errUserLoginID != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Unauthorized",
+		})
+	}
+	
 	userId := ctx.Params("userId")
 	var user models.User
 
@@ -52,10 +63,23 @@ func GetUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 	if errParse != nil {
 		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error": "User not found",
-	})
+		})
 	}
 
-	if err := db.Preload("AccountConfig").First(&user, userID).Error; err != nil {
+	areYouFollowThisUser := false
+	var existingFollow models.Following
+
+	if err := db.Where("user_id = ? AND following_id = ?", userLoginID, userID).First(&existingFollow).Error; err == nil {
+		areYouFollowThisUser = true
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		// Jika error bukan karena data tidak ditemukan, maka return error
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Gagal memeriksa status follow",
+		})
+	}
+
+
+	if err := db.Preload("AccountConfig").Preload("Subscription").First(&user, userID).Error; err != nil {
 		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error": "User not found",
 		})
@@ -75,6 +99,8 @@ func GetUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 	// fmt.Println("ada ga :" ,albums)
 
 	// Loop through albums
+	var storageUsed float32
+	storageUsed = 0.00
 	for _, album := range albums {
 
 		// fmt.Println(album.Title)
@@ -93,15 +119,27 @@ func GetUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 			sumSizeVideo += video.Size
 		}
 
-		userStats.StorageUsed += int(sumSizeImage) + int(sumSizeVideo)
+		storageUsed += sumSizeImage + sumSizeVideo
+	}
+
+	if storageUsed < 1024 {
+		userStats.StorageUsed = fmt.Sprintf("%.2f MB", storageUsed)
+	} else {
+		storageUsedGB := storageUsed / 1024
+		userStats.StorageUsed = fmt.Sprintf("%.2f GB", storageUsedGB)
 	}
 
 	// Set storage capacity (example: 10GB)
-	userStats.StorageCapacity = 10 * 1024 // in MB, adjust as needed
+	fmt.Println("user sub : ", user.Subscription)
+	fmt.Println("user storage : ", user.Subscription.StorageCapacity )
+
+	storageCapacity := int(user.Subscription.StorageCapacity)
+
+	userStats.StorageCapacity = fmt.Sprintf("%.2f GB", float64(storageCapacity))
 
 	// Calculate storage percentage
-	if userStats.StorageCapacity > 0 {
-		userStats.StoragePercentage = int(float64(userStats.StorageUsed) / float64(userStats.StorageCapacity) * 100)
+	if storageCapacity > 0 {
+		userStats.StoragePercentage = math.Round(float64(storageUsed) / float64(storageCapacity)) / 1024.0
 	}
 
 
@@ -122,8 +160,9 @@ func GetUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 		Phone:          user.Phone,
 		JobTitle:       user.JobTitle,
 		SocialMedia:    user.SocialMedia,
-		Subscription:  user.Subscription,
+		Subscription:  user.Subscription.SubscriptionType,
 		TagPreference: user.TagPreference,
+		AreYouFollowingUser: areYouFollowThisUser,
 		CreatedAt:      user.CreatedAt,
 		UpdatedAt:      user.UpdatedAt,
 	}
@@ -281,5 +320,147 @@ func UpdateProfilePicture(ctx *fiber.Ctx, db *gorm.DB) error {
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
 		"message": "Profile picture updated successfully",
 		"user":    user,
+	})
+}
+
+func FollowUser(ctx *fiber.Ctx, db *gorm.DB) error {
+	userLoginID, errUserLoginID := utils.GetUserID(ctx)
+	if errUserLoginID != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Unauthorized",
+		})
+	}
+
+	userToFollowID := ctx.Query("user_to_follow")
+	userToFollowParseID, errParse := uuid.Parse(userToFollowID)
+	if errParse != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid user_to_follow ID",
+		})
+	}
+
+	// Cek apakah user sedang follow user lain
+	var existingFollow models.Following
+	err := db.
+		Where("user_id = ? AND following_id = ?", userLoginID, userToFollowParseID).
+		First(&existingFollow).Error
+
+	if err == nil {
+		// Sudah follow, maka lakukan unfollow (hapus)
+		if errFollow := db.Unscoped().Delete(&existingFollow).Error; errFollow != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Gagal melakukan unfollow",
+			})
+		}
+		return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+			"message": "Berhasil unfollow",
+			"is_user_now_follow": false,
+		})
+	}
+
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Belum follow, maka buat follow baru
+		newFollow := models.Following{
+			UserID:      userLoginID,
+			FollowingID: userToFollowParseID,
+			CreatedAt:   time.Now(),
+		}
+		if err := db.Create(&newFollow).Error; err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Gagal melakukan follow",
+			})
+		}
+		return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+			"message": "Berhasil follow",
+			"is_user_now_follow": true,
+		})
+	}
+
+	// Jika error selain not found
+	return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+		"error": "Gagal memproses follow",
+	})
+}
+
+func ChangeSubscription(ctx *fiber.Ctx, db *gorm.DB) error {
+	// Define request body struct
+	type SubscriptionBodyReq struct {
+		TypeID        uint   `json:"type_id"`
+		PaymentMethod string `json:"payment_method"`
+	}
+
+	var req SubscriptionBodyReq
+	if err := ctx.BodyParser(&req); err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	// Get user ID from context
+	userID, err := utils.GetUserID(ctx)
+	if err != nil {
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Unauthorized",
+		})
+	}
+
+	// Find user
+	var user models.User
+	if err := db.Preload("Subscription").Preload("UserSubscriptions").First(&user, "id = ?", userID).Error; err != nil {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "User not found",
+		})
+	}
+
+	// Find new subscription type
+	var newSubType models.Subscription
+	if err := db.First(&newSubType, req.TypeID).Error; err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Subscription type not found",
+		})
+	}
+
+	// Change current UserSubscription status to Expired
+	if len(user.UserSubscriptions) > 0 {
+		for i := range user.UserSubscriptions {
+			us := &user.UserSubscriptions[i]
+			if us.Status == "Active" {
+				us.Status = "Expired"
+				us.EndDate = time.Now()
+				if err := db.Save(us).Error; err != nil {
+					return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+						"error": "Failed to expire current subscription",
+					})
+				}
+			}
+		}
+	}
+
+	// Create new UserSubscription
+	newUserSub := models.UserSubscription{
+		UserID:         user.ID,
+		SubscriptionID: newSubType.ID,
+		Status:         "Active",
+		PaymentMethod:  req.PaymentMethod,
+		StartDate:      time.Now(),
+		EndDate:      time.Now().AddDate(0, 1, 0), // Example: 1 month from now
+	}
+	if err := db.Create(&newUserSub).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to create new subscription",
+		})
+	}
+
+	// Update user's Subscription reference
+	user.SubscriptionID = newSubType.ID
+	if err := db.Save(&user).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to update user subscription",
+		})
+	}
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message":      "Subscription updated successfully",
+		"subscription": newSubType,
 	})
 }
