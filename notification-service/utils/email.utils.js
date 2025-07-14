@@ -20,6 +20,8 @@ function getTemplateHTML(type, variables = {}) {
     case "subscription-due":
       templateFile = "subscription.due.html";
       break;
+    case "album-invitation":
+      templateFile = "album.invitation.html";
     default:
       throw new Error("Unknown template type");
   }

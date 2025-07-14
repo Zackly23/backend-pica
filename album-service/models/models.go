@@ -14,5 +14,9 @@ func GetModels() []interface{} {
 		&AlbumLike{},
 		&MediaLike{},
 		// &Permission{},
+		&UserSubscription{},
+		&Subscription{},
+		&Following{},
+
 	}
 }

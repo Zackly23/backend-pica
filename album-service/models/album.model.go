@@ -48,6 +48,7 @@ type AlbumVideo struct {
 type Album struct {
 	ID           uuid.UUID       `gorm:"type:uuid;default:uuid_generate_v4()" json:"id"`
 	UserID       uuid.UUID       `gorm:"type:uuid;not null;index" json:"user_id"`
+	User      	 User      `gorm:"foreignKey:UserID;references:ID" json:"user,omitempty"`
 	Tags         []AlbumTag      `gorm:"many2many:album_album_tags" json:"tags,omitempty"`
 	Title        string          `gorm:"not null" json:"title"`
 	Description  string          `json:"description,omitempty"`
@@ -57,6 +58,7 @@ type Album struct {
 	AlbumVideos  []AlbumVideo    `gorm:"foreignKey:AlbumID" json:"album_videos,omitempty"`
 	Comments	 []AlbumComment  `gorm:"foreignKey:AlbumID" json:"album_comments,omitempty"`
 	TargetEmail  json.RawMessage `gorm:"type:jsonb" json:"target_email,omitempty"`
+	ViewCount    uint           	`gorm:"default:0" json:"view_count"`
 	CreatedAt    time.Time       `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt    time.Time       `gorm:"autoUpdateTime" json:"updated_at"`
 	DeletedAt    gorm.DeletedAt  `gorm:"index" json:"deleted_at,omitempty"`

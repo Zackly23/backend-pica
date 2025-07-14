@@ -81,7 +81,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, client notif.NotificationServiceCl
 		return handlers.Login(c, db)
 	})
 	auth.Post("/signup", func(c *fiber.Ctx) error {
-		return handlers.SignUp(c, db)
+		return handlers.SignUp(c, db, client)
 	})
 	auth.Get("/refresh", func(c *fiber.Ctx) error {
 		return handlers.Refresh(c, db)
@@ -101,7 +101,11 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, client notif.NotificationServiceCl
 	})
 
 	auth.Post("/verify-totp", func(c *fiber.Ctx) error {
-		return handlers.VerifyTOTP(c, db)
+		return handlers.VerifyTOTP(c, db, client)
+	})
+
+	auth.Post("/verifiy-tfa", func(c *fiber.Ctx) error {
+		return handlers.VerifyTFA(c, db, client)
 	})
 
 	// Protected routes (dengan JWT middleware)
@@ -113,6 +117,9 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, client notif.NotificationServiceCl
 
 	userRoutes := authRoutes.Group("/users")
 
+	userRoutes.Post("/follow", func(c *fiber.Ctx) error {
+		return handlers.FollowUser(c, db)
+	})
 
 	userRoutes.Delete("/deactivate", func(c *fiber.Ctx) error {
 		return handlers.DeactivateAccount(c, db)
@@ -142,7 +149,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, client notif.NotificationServiceCl
 	albumRoutes := authRoutes.Group("/albums")
 	
 	albumRoutes.Post("/", func(c *fiber.Ctx) error {
-		return handlers.StoreAlbums(c, db)
+		return handlers.StoreAlbums(c, db, client)
 	})
 	
 	//ini /albums dulunya
@@ -152,6 +159,10 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, client notif.NotificationServiceCl
 
 	albumRoutes.Post("/media", func(c *fiber.Ctx) error {
 		return handlers.UploadMediaAlbum(c, db)
+	})
+
+	albumRoutes.Get("/media/follower", func(c *fiber.Ctx) error {
+		return handlers.GetAlbumFollower(c, db)
 	})
 
 	albumRoutes.Get("/comments", func(c *fiber.Ctx) error {
@@ -174,8 +185,8 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, client notif.NotificationServiceCl
 		return handlers.GetLatestImage(c, db)
 	})
 
-	albumRoutes.Put("/:albumId/target", func(c *fiber.Ctx) error {
-		return handlers.UpdateTargetEmail(c, db)
+	albumRoutes.Put("/:albumId/target-email", func(c *fiber.Ctx) error {
+		return handlers.UpdateTargetEmail(c, db, client)
 	})
 
 	albumRoutes.Get("/:albumId", func(c *fiber.Ctx) error {
@@ -184,6 +195,10 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, client notif.NotificationServiceCl
 
 	albumRoutes.Put("/:albumID", func(c *fiber.Ctx) error {
 		return handlers.UpdateAlbum(c, db)
+	})
+
+	albumRoutes.Delete("/:albumID", func(c *fiber.Ctx) error {
+		return handlers.DeleteAlbum(c, db)
 	})
 	// Tambahkan route lain yang butuh proteksi di sini
 }
