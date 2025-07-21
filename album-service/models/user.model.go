@@ -32,8 +32,10 @@ type User struct {
 	Following		[]Following			`gorm:"foreignKey:UserID" json:"following"`
 	UserSubscriptions []UserSubscription `gorm:"foreignKey:UserID"`
 	Status           string          `json:"status,omitempty" gorm:"type:varchar(50);default:active"`
+	SubscriptionFreeStatus           string          `json:"subscription_free_status,omitempty" gorm:"type:varchar(50);default:active"`
 	DeactivateUntil  time.Time       `json:"deactivate_until,omitempty"`
 	ProfilePicture   string          `json:"profile_picture,omitempty"`
+	AgreeTermService bool			  `json:"agree_term_service"`
 	AccountConfig    AccountConfig   `json:"account_config,omitempty" gorm:"foreignKey:UserID;constraint:OnUpdate:CASCADE,OnDelete:SET NULL"`
 	CreatedAt        time.Time       `json:"created_at"`
 	UpdatedAt        time.Time       `json:"updated_at"`
@@ -80,6 +82,7 @@ type UserSubscription struct {
 	PaymentMethod  string		  `gorm:"type:varchar(100)" json:"payment_method"`
 	StartDate      time.Time      `json:"start_date" gorm:"not null"`
 	EndDate        time.Time      `json:"end_date" gorm:"not null"`
+	Amount		   float32		  `json:"amount" gorm:""`
 	Status 		   string		  `json:"status" gorm:"type:varchar(50)"`
 	CreatedAt      time.Time      `json:"created_at" gorm:"autoCreateTime"`
 	UpdatedAt      time.Time      `json:"updated_at" gorm:"autoUpdateTime"`
@@ -94,3 +97,4 @@ type Following struct {
 	CreatedAt   time.Time      `json:"created_at" gorm:"autoCreateTime"`
 	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
 }
+

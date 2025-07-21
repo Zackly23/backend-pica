@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <title>Aktivasi Autentikasi Dua Faktor</title>
+    <title>Login Berhasil dengan Autentikasi Dua Faktor</title>
   </head>
   <body
     style="
@@ -30,7 +30,7 @@
             <tr>
               <td style="background-color: #1a73e8; padding: 20px">
                 <h1 style="margin: 0; font-size: 20px; color: #ffffff">
-                  Autentikasi Dua Faktor Diaktifkan
+                  Login Berhasil dengan TFA
                 </h1>
               </td>
             </tr>
@@ -50,15 +50,10 @@
                     margin-bottom: 15px;
                   "
                 >
-                  Fitur
-                  <strong
-                    >Autentikasi Dua Faktor (Two-Factor Authentication /
-                    TFA)</strong
-                  >
-                  telah berhasil diaktifkan untuk akun Anda. Mulai sekarang,
-                  setiap kali Anda login, Anda akan diminta untuk memasukkan
-                  kode verifikasi tambahan dari aplikasi autentikator Anda
-                  (seperti Google Authenticator atau Authy).
+                  Kami ingin memberi tahu bahwa login ke akun Anda telah
+                  berhasil menggunakan
+                  <strong>Autentikasi Dua Faktor (TFA)</strong> dengan kode
+                  verifikasi dari aplikasi autentikator.
                 </p>
 
                 <p
@@ -69,25 +64,20 @@
                     margin-bottom: 15px;
                   "
                 >
-                  Fitur ini memberikan lapisan keamanan tambahan untuk
-                  melindungi akun Anda dari akses yang tidak sah.
+                  Waktu login: <strong>{{login_time}}</strong><br />
+                  Alamat IP: <strong>{{ip_address}}</strong><br />
+                  Lokasi (jika tersedia): <strong>{{location}}</strong>
                 </p>
 
-                <p
-                  style="
-                    font-size: 15px;
-                    color: #555555;
-                    line-height: 1.6;
-                    margin-bottom: 15px;
-                  "
-                >
-                  Jika Anda tidak merasa mengaktifkan fitur ini, segera hubungi
-                  tim dukungan kami untuk langkah pengamanan lebih lanjut.
+                <p style="font-size: 15px; color: #555555; line-height: 1.6">
+                  Jika Anda tidak merasa melakukan login ini, segera ubah kata
+                  sandi Anda dan hubungi tim keamanan kami untuk tindakan lebih
+                  lanjut.
                 </p>
 
                 <p style="font-size: 15px; color: #555555; margin-top: 30px">
                   Hormat kami,<br />
-                  <strong>Tim Keamanan & Dukungan Pelanggan</strong>
+                  <strong>Tim Keamanan Akun</strong>
                 </p>
               </td>
             </tr>

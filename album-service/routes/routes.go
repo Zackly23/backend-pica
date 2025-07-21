@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	notif "github.com/Zackly23/queue-app/proto/notificationpb"
+	"github.com/Zackly23/queue-app/utils"
 
 	"github.com/Zackly23/queue-app/handlers"
 	"github.com/Zackly23/queue-app/models"
@@ -13,6 +14,94 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/gorm"
 )
+
+func DynamicStorageCapacityMiddleware(db *gorm.DB) fiber.Handler {
+	return func(ctx *fiber.Ctx) error {
+		userID, err := utils.GetUserID(ctx)
+		if err != nil {
+			return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Unauthorized",
+			})
+		}
+
+		// Ambil user beserta data subscription
+		var user models.User
+		if err := db.Preload("Subscription").First(&user, "id = ?", userID).Error; err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Gagal mengambil data subscription user",
+			})
+		}
+
+		// Ambil semua album beserta isinya
+		var albums []models.Album
+		if err := db.Preload("AlbumImages").Preload("AlbumVideos").Where("user_id = ?", user.ID).Find(&albums).Error; err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Gagal mengambil data album user",
+			})	
+		}
+
+		// Hitung total penggunaan penyimpanan
+		// Hitung total penggunaan penyimpanan
+		var storageUsed float64 = 0.0
+		for _, album := range albums {
+			for _, image := range album.AlbumImages {
+				storageUsed += float64(image.Size) // dalam MB
+			}
+			for _, video := range album.AlbumVideos {
+				storageUsed += float64(video.Size) // dalam MB
+			}
+		}
+
+		storageCapacity := float64(user.Subscription.StorageCapacity) * 1024 // dari GB ke MB
+
+		fmt.Println("Storage Capacity:", storageCapacity, "MB")
+		// Cek apakah storage sudah penuh
+		if storageCapacity > 0 {
+			percentageUsed := (storageUsed / storageCapacity) * 100.0
+			fmt.Printf("Storage Used: %.2f MB, Percentage Used: %.2f%%\n", storageUsed, percentageUsed)
+			if percentageUsed >= 100 {
+				return ctx.Status(fiber.StatusUnavailableForLegalReasons).JSON(fiber.Map{
+					"error": fmt.Sprintf("Kapasitas album sudah penuh. Maksimum %.2f GB", user.Subscription.StorageCapacity),
+				})
+			}
+		}
+
+		return ctx.Next()
+	}
+}
+
+func DynamicBodyLimitMiddleware(db *gorm.DB) fiber.Handler {
+	return func(ctx *fiber.Ctx) error {
+		userID, err := utils.GetUserID(ctx)
+		if err != nil {
+			return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Unauthorized",
+			})
+		}
+
+		// Get user's subscription info
+		var user models.User
+		if err := db.Preload("Subscription").First(&user, "id = ?", userID).Error; err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to fetch user subscription",
+			})
+		}
+
+		// Read Content-Length from header
+		contentLength := ctx.Request().Header.ContentLength()
+		maxAllowedSize := int(user.Subscription.MaximumMediaSize * 1024 * 1024 * 100) // Convert MB to Bytes
+
+		if contentLength > maxAllowedSize {
+			return ctx.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{
+				"error": fmt.Sprintf("File terlalu besar. Maksimum %v MB", user.Subscription.MaximumMediaSize),
+			})
+		}
+
+		// Lanjut ke handler
+		return ctx.Next()
+	}
+}
+
 
 func JWTMiddleware(db *gorm.DB) fiber.Handler {
 	return func(c *fiber.Ctx) error {
@@ -104,7 +193,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, client notif.NotificationServiceCl
 		return handlers.VerifyTOTP(c, db, client)
 	})
 
-	auth.Post("/verifiy-tfa", func(c *fiber.Ctx) error {
+	auth.Post("/verify-tfa", func(c *fiber.Ctx) error {
 		return handlers.VerifyTFA(c, db, client)
 	})
 
@@ -121,12 +210,16 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, client notif.NotificationServiceCl
 		return handlers.FollowUser(c, db)
 	})
 
+	userRoutes.Get("/subscription", func(c *fiber.Ctx) error {
+		return handlers.GetSubscriptionHistory(c, db)
+	})
+
 	userRoutes.Delete("/deactivate", func(c *fiber.Ctx) error {
-		return handlers.DeactivateAccount(c, db)
+		return handlers.DeactivateAccount(c, db, client)
 	})
 
 	userRoutes.Delete("/delete", func(c *fiber.Ctx) error {
-		return handlers.DeleteAccount(c, db)
+		return handlers.DeleteAccount(c, db, client)
 	})
 
 	userRoutes.Get("/:userId", func(c *fiber.Ctx) error {
@@ -146,9 +239,9 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, client notif.NotificationServiceCl
 		return handlers.UpdateProfilePicture(c, db)
 	})
 
-	albumRoutes := authRoutes.Group("/albums")
+	albumRoutes := authRoutes.Group("/albums", DynamicBodyLimitMiddleware(db))
 	
-	albumRoutes.Post("/", func(c *fiber.Ctx) error {
+	albumRoutes.Post("/", DynamicStorageCapacityMiddleware(db), func(c *fiber.Ctx) error {
 		return handlers.StoreAlbums(c, db, client)
 	})
 	
@@ -157,7 +250,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, client notif.NotificationServiceCl
 		return handlers.GetAllAlbums(c, db)
 	})
 
-	albumRoutes.Post("/media", func(c *fiber.Ctx) error {
+	albumRoutes.Post("/media", DynamicStorageCapacityMiddleware(db), func(c *fiber.Ctx) error {
 		return handlers.UploadMediaAlbum(c, db)
 	})
 
@@ -193,7 +286,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, client notif.NotificationServiceCl
 		return handlers.GetAlbum(c, db)
 	})
 
-	albumRoutes.Put("/:albumID", func(c *fiber.Ctx) error {
+	albumRoutes.Put("/:albumID", DynamicStorageCapacityMiddleware(db), func(c *fiber.Ctx) error {
 		return handlers.UpdateAlbum(c, db)
 	})
 

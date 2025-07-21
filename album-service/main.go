@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
+
+	// "time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -12,9 +15,13 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/joho/godotenv"
+	"github.com/robfig/cron/v3"
 
 	"github.com/Zackly23/queue-app/config"
+	"github.com/Zackly23/queue-app/jobs"
 	notif "github.com/Zackly23/queue-app/proto/notificationpb"
+
+	// "github.com/Zackly23/queue-app/wasabi"
 
 	"github.com/Zackly23/queue-app/routes"
 )
@@ -23,13 +30,24 @@ func main() {
 	// Load .env
 	var databaseInstance config.Database
 	var db *gorm.DB
-
+	var bucket config.AWSS3Bucket
 
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("No .env file found")
 	}
 
+
+	//setup s3
+
+	bucket = config.AWSS3Bucket{
+		BucketName: "your-bucket-name",
+		Region:     "ap-southeast-1", // contoh region
+	}
+
+	bucket.SetupBucket()
+	bucket.Test()
+	
 	// Connect DB + Redis
 	db, err = databaseInstance.ConnectDatabase()
 	config.ConnectRedis()
@@ -37,7 +55,28 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
+
 	log.Println("Database connected successfully")
+
+	// setup cron job
+	cronJob := cron.New(cron.WithLocation(time.FixedZone("Asia/Jakarta", 7*60*60)))
+
+	cronJob.AddFunc("0 2 * * *", func() {
+		log.Println("Menjalankan cron: CleanUpUnusedFiles")
+		jobs.CleanUpUnusedFiles(db)
+	})
+
+	cronJob.AddFunc("0 0 * * *", func() {
+		log.Println("Menjalankan cron: UpdateSubscriptionType User")
+		jobs.UpdateSubscriptionType(db)
+	})
+
+	// cronJob.AddFunc("@every 1m", func() {
+	// 	log.Println("Menjalankan cron setiap 1 menit (testing)")
+	// })
+
+	cronJob.Start()
+
 
 	conn, err := grpc.NewClient(":50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
     if err != nil {
@@ -49,9 +88,7 @@ func main() {
     client := notif.NewNotificationServiceClient(conn)
 
 	// Init Fiber
-	app := fiber.New(fiber.Config{
-		BodyLimit: 100 * 1024 * 1024, // 100 MB misalnya
-	})
+	app := fiber.New()
 
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "http://localhost:5173",

@@ -59,7 +59,7 @@ func (d *Database) ConnectDatabase() (*gorm.DB, error) {
 		return nil, fmt.Errorf("💥 final failure after %d retries: %w", maxRetries, err)
 	}
 
-	//seed permission
+	// seed permission
 
 	// if err := db.Migrator().DropTable(models.GetModels()...); err != nil {
 	// 	fmt.Println("Failed to Drop models:", err)

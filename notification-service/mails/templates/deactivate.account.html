@@ -2,22 +2,57 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <title>Account Deactivation</title>
+    <title>Penonaktifan Akun</title>
   </head>
-  <body style="font-family: Arial; padding: 30px; background: #fafafa">
-    <div
-      style="
-        max-width: 600px;
-        margin: auto;
-        background: #fff;
-        padding: 20px;
-        border-radius: 8px;
-      "
-    >
-      <h2>Hi {{name}},</h2>
-      <p>Your account has been successfully deactivated.</p>
-      <p>If this was not you, please contact our support team immediately.</p>
-      <p>Regards,<br />The Team</p>
-    </div>
+  <body style="margin: 0; padding: 0; background-color: #f4f6f8; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="padding: 40px 0;">
+      <tr>
+        <td align="center">
+          <table width="600" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 10px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05); overflow: hidden;">
+            <!-- Header -->
+            <tr>
+              <td style="background-color: #1a73e8; padding: 20px;">
+                <h1 style="margin: 0; font-size: 20px; color: #ffffff;">Notifikasi Penonaktifan Akun</h1>
+              </td>
+            </tr>
+
+            <!-- Body -->
+            <tr>
+              <td style="padding: 30px;">
+                <p style="font-size: 16px; color: #333333; margin-bottom: 20px;">Yth. {{name}},</p>
+
+                <p style="font-size: 15px; color: #555555; line-height: 1.6; margin-bottom: 15px;">
+                  Kami informasikan bahwa akun Anda telah berhasil dinonaktifkan dari sistem kami.
+                </p>
+
+                <p style="font-size: 15px; color: #555555; line-height: 1.6; margin-bottom: 15px;">
+                  Penonaktifan ini bersifat sementara dan akan berlaku selama <strong>30 hari ke depan</strong>. Selama periode tersebut, Anda masih memiliki kesempatan untuk mengaktifkan kembali akun Anda dengan cara melakukan <strong>login seperti biasa</strong>.
+                </p>
+
+                <p style="font-size: 15px; color: #555555; line-height: 1.6; margin-bottom: 15px;">
+                  Apabila Anda tidak melakukan login dalam waktu 30 hari, akun Anda akan dinonaktifkan secara permanen.
+                </p>
+
+                <p style="font-size: 15px; color: #555555; line-height: 1.6;">
+                  Jika Anda merasa tidak melakukan tindakan ini, segera hubungi tim dukungan kami untuk penanganan lebih lanjut.
+                </p>
+
+                <p style="font-size: 15px; color: #555555; margin-top: 30px;">
+                  Hormat kami,<br />
+                  <strong>Tim Layanan Pelanggan</strong>
+                </p>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="background-color: #f1f3f4; text-align: center; padding: 20px; font-size: 12px; color: #999999;">
+                Email ini dikirim secara otomatis. Mohon tidak membalas pesan ini.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
   </body>
 </html>

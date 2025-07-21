@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strings"
 	"time"
@@ -37,11 +38,12 @@ type UserUpdateRequest struct {
 
 type UserStatResponse struct {
 	MediaCount int `json:"media_count"`
-	FollowersCount int `json:"followers_count"`
-	FollowingCount int `json:"following_count"`
+	FollowersCount int64 `json:"followers_count"`
+	FollowingCount int64 `json:"following_count"`
 	StorageUsed string `json:"storage_used"`
 	StorageCapacity string `json:"storage_capacity"`
 	StoragePercentage float64 `json:"storage_percentage"`
+	IsStorageFull bool `json:"is_storage_full"`
 }
 
 var validate = validator.New()
@@ -79,7 +81,7 @@ func GetUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 	}
 
 
-	if err := db.Preload("AccountConfig").Preload("Subscription").First(&user, userID).Error; err != nil {
+	if err := db.Preload("AccountConfig").Preload("Subscription").Preload("Following").First(&user, userID).Error; err != nil {
 		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error": "User not found",
 		})
@@ -139,10 +141,42 @@ func GetUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 
 	// Calculate storage percentage
 	if storageCapacity > 0 {
-		userStats.StoragePercentage = math.Round(float64(storageUsed) / float64(storageCapacity)) / 1024.0
+		percentage := math.Round(float64(storageUsed) / float64(storageCapacity)) / 1024.0
+
+		if percentage < 100{
+			userStats.StoragePercentage = percentage
+		} else {
+			userStats.StoragePercentage = 100
+		}
+
 	}
 
+	if (userStats.StoragePercentage >= 100) {
+		userStats.IsStorageFull = true
+	}
 
+	// Ambil jumlah user yang di-follow oleh user ini (following)
+	var followingCount int64
+	if err := db.Model(&models.Following{}).Where("user_id = ?", user.ID).Count(&followingCount).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mendapatkan jumlah following"})
+	}
+	userStats.FollowingCount = followingCount
+
+	// Ambil jumlah follower (user lain yang mengikuti user ini)
+	var followersCount int64
+	if err := db.Model(&models.Following{}).Where("following_id = ?", user.ID).Count(&followersCount).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mendapatkan jumlah follower"})
+	}
+	userStats.FollowersCount = followersCount
+
+
+	key := strings.TrimPrefix(user.ProfilePicture, "https://s3-pixovaulty.s3.ap-southeast-1.amazonaws.com/")
+	avatarSignedURL, errURL := utils.GeneratePresignedURL("s3-pixovaulty", key)
+	if errURL != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal generate presigned URL"})
+	}
+
+	
 	response := UserLoginResponse{
 		ID:             user.ID,
 		FirstName:      user.FirstName,
@@ -155,7 +189,7 @@ func GetUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 		CompanyName:    user.CompanyName,
 		Bio: 		  	user.Bio,
 		Email:          user.Email,
-		ProfilePicture: user.ProfilePicture,
+		ProfilePicture: avatarSignedURL,
 		Address:        user.Address,
 		Phone:          user.Phone,
 		JobTitle:       user.JobTitle,
@@ -277,17 +311,15 @@ func UpdateUserData(ctx *fiber.Ctx, db *gorm.DB) error {
 
 func UpdateProfilePicture(ctx *fiber.Ctx, db *gorm.DB) error {
 	var user models.User
-	// userID := ctx.Params("userId")
-	userID, errID := utils.GetUserID(ctx)
 
+	userID, errID := utils.GetUserID(ctx)
 	if errID != nil {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Error retrieced User ID",
+			"error": "Error retrieving User ID",
 		})
 	}
 
 	form, errForm := ctx.FormFile("profile_picture")
-
 	if errForm != nil {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "No file uploaded with key 'profile_picture'. Please ensure the form field name matches.",
@@ -300,17 +332,23 @@ func UpdateProfilePicture(ctx *fiber.Ctx, db *gorm.DB) error {
 		})
 	}
 
-	// Save the uploaded file to a directory (e.g., "./uploads/profile_pictures/")
-	savePath := fmt.Sprintf("./storages/images/profile/%s", form.Filename)
-	if err := ctx.SaveFile(form, savePath); err != nil {
-		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to save profile picture",
-		})
+	// Delete previous profile picture if exists and is from S3 (not default)
+	if user.ProfilePicture != "" && !strings.Contains(user.ProfilePicture, "default") {
+		// oldKey := strings.TrimPrefix(user.ProfilePicture, "https://s3-pixovaulty.s3.ap-southeast-1.amazonaws.com/")
+		errDel := utils.DeleteFromS3(user.ProfilePicture, "s3-pixovaulty",)
+		if errDel != nil {
+			log.Printf("Warning: Failed to delete old profile picture: %v", errDel)
+		}
 	}
 
-	// Set the profile picture URL (assuming static files are served from /static/profile_pictures/)
-	user.ProfilePicture = fmt.Sprintf("/static/profile_pictures/%s", form.Filename)
+	// Upload new picture
+	s3URL, err := utils.UploadToS3(form, "images/profile/avatar_"+ user.ID.String())
+	if err != nil {
+		return fmt.Errorf("failed to upload to S3: %w", err)
+	}
 
+	// Update DB
+	user.ProfilePicture = s3URL
 	if err := db.Save(&user).Error; err != nil {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Failed to update profile picture",
@@ -322,6 +360,7 @@ func UpdateProfilePicture(ctx *fiber.Ctx, db *gorm.DB) error {
 		"user":    user,
 	})
 }
+
 
 func FollowUser(ctx *fiber.Ctx, db *gorm.DB) error {
 	userLoginID, errUserLoginID := utils.GetUserID(ctx)
@@ -462,5 +501,76 @@ func ChangeSubscription(ctx *fiber.Ctx, db *gorm.DB) error {
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
 		"message":      "Subscription updated successfully",
 		"subscription": newSubType,
+	})
+}
+
+func GetSubscriptionHistory(ctx *fiber.Ctx, db *gorm.DB) error {
+	startDateStr := ctx.Query("start_date")
+	endDateStr := ctx.Query("end_date")
+	search := ctx.Query("search")
+
+	userID, err := utils.GetUserID(ctx)
+	if err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"message": "Failed to retrieve user ID",
+			"error":   err.Error(),
+		})
+	}
+
+	var subscriptions []models.UserSubscription
+	query := db.Preload("User").Preload("Subscription").Where("user_id = ?", userID)
+
+	// Filter by date range if provided
+	if startDateStr != "" && endDateStr != "" {
+		startDate, errStart := time.Parse("2006-01-02", startDateStr)
+		endDate, errEnd := time.Parse("2006-01-02", endDateStr)
+		if errStart != nil || errEnd != nil {
+			return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"message": "Invalid date format. Use YYYY-MM-DD.",
+			})
+		}
+		query = query.Where("created_at BETWEEN ? AND ?", startDate, endDate)
+	}
+
+	// Search by customer name
+	if search != "" {
+		searchPattern := "%" + search + "%"
+		query = query.Joins("JOIN users ON users.id = user_subscriptions.user_id").
+			Where("users.first_name ILIKE ? OR users.last_name ILIKE ?", searchPattern, searchPattern)
+	}
+
+	if err := query.Find(&subscriptions).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"message": "Failed to retrieve subscription history",
+			"error":   err.Error(),
+		})
+	}
+
+	type SubscriptionHistoryResponse struct {
+		ID               uuid.UUID `json:"id"`
+		CustomerName     string    `json:"customer_name"`
+		PaymentMethod    string    `json:"payment_method"`
+		SubscriptionType string    `json:"subscription_type"`
+		Amount           float32   `json:"amount"`
+		Status           string    `json:"status"`
+		CreatedAt        string    `json:"created_at"`
+	}
+
+	var response []SubscriptionHistoryResponse
+	for _, sub := range subscriptions {
+		response = append(response, SubscriptionHistoryResponse{
+			ID:               sub.ID,
+			CustomerName:     sub.User.FirstName + " " + sub.User.LastName,
+			PaymentMethod:    sub.PaymentMethod,
+			SubscriptionType: sub.Subscription.SubscriptionType,
+			Amount:           sub.Amount,
+			Status:           sub.Status,
+			CreatedAt:        sub.CreatedAt.Format("2006-01-02 15:04:05"),
+		})
+	}
+
+	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message":       "Subscription history retrieved successfully",
+		"subscriptions": response,
 	})
 }

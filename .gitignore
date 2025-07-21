@@ -39,6 +39,7 @@ coverage/
 /album-service/.env
 /album-service/.env.*
 
+
 /album-service/storages/images
 /album-service/storages/videos
 

@@ -18,9 +18,8 @@ func AuthTokenJWT(ctx *fiber.Ctx) (*jwt.Token, error) {
 	}
 
 	// Jika pakai "Bearer <token>", hapus prefix
-	if strings.HasPrefix(accessToken, "Bearer ") {
-		accessToken = strings.TrimPrefix(accessToken, "Bearer ")
-	}
+	accessToken = strings.TrimPrefix(accessToken, "Bearer ")
+
 
 	// Parse dan verifikasi token
 	jwtSecret := os.Getenv("JWT_SECRET_KEY")

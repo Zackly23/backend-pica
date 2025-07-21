@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"mime/multipart"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,6 +52,7 @@ type AlbumMedia struct {
 	Size         float32   `json:"size"`
 	Type         string    `json:"type"`
 	CreatedAt    time.Time `json:"created_at"`
+	CreatedAtModified    string  `json:"created_at_modified"`
 	MediaKind    string    `json:"media_kind"` // "image" or "video"
 }
 
@@ -70,6 +70,7 @@ type AlbumDetailRequest struct {
 	TargetEmail  json.RawMessage `json:"target_email"`
 	AlbumImages  []AlbumImageRequest `json:"album_images,omitempty"` // nested images
 	AlbumVideos  []AlbumVideoRequest `json:"album_videos,omitempty"`
+	CreatedAt 	string		`json:"created_at"`
 }
 
 type AlbumImageRequest struct {
@@ -125,15 +126,13 @@ func updateVideo(db *gorm.DB, videoDescription string, albumVideoId any) error {
 	}
 
 	return &fiber.Error{Code: 300, Message: "Failed to update video"}
-
-
 	
 }
 
 func storeImage(db *gorm.DB, file *multipart.FileHeader, albumID uuid.UUID, imageDescription string, albumImageID any) error {
-	dst := fmt.Sprintf("./storages/images/%s", file.Filename)
-	if err := utils.SaveMultipartFile(file, dst); err != nil {
-		return fmt.Errorf("gagal menyimpan file gambar: %w", err)
+	s3URL, err := utils.UploadToS3(file, "images/albums/album_" + albumID.String() + "/"+ file.Filename)
+	if err != nil {
+		return fmt.Errorf("gagal mengupload ke S3: %w", err)
 	}
 
 	sizeMB := float32(file.Size) / (1024 * 1024)
@@ -145,7 +144,7 @@ func storeImage(db *gorm.DB, file *multipart.FileHeader, albumID uuid.UUID, imag
 			// Update gambar jika ID valid
 			var existingImage models.AlbumImage
 			if err := db.First(&existingImage, id).Error; err == nil {
-				existingImage.ImageURL = dst
+				existingImage.ImageURL = s3URL
 				existingImage.Size = sizeMB
 				existingImage.Type = mimeType
 				existingImage.Description = imageDescription
@@ -157,7 +156,7 @@ func storeImage(db *gorm.DB, file *multipart.FileHeader, albumID uuid.UUID, imag
 	// Jika tidak ada ID, buat baru
 	image := models.AlbumImage{
 		AlbumID:     albumID,
-		ImageURL:    dst,
+		ImageURL:    s3URL,
 		Size:        sizeMB,
 		Type:        mimeType,
 		Description: imageDescription,
@@ -167,10 +166,13 @@ func storeImage(db *gorm.DB, file *multipart.FileHeader, albumID uuid.UUID, imag
 }
 
 func storeVideo(db *gorm.DB, file *multipart.FileHeader, albumID uuid.UUID, videoDescription string, albumVideoId any) error {
-	dst := fmt.Sprintf("./storages/videos/%s", file.Filename)
-	if err := utils.SaveMultipartFile(file, dst); err != nil {
-		return fmt.Errorf("gagal menyimpan file video: %w", err)
+	s3URL, err := utils.UploadToS3(file, "videos/albums/album_"+  albumID.String() + "/" + file.Filename)
+	if err != nil {
+		return fmt.Errorf("gagal mengupload ke S3: %w", err)
 	}
+
+	//Generate Thumbnail
+	thumnailVideo := "https://s3-pixovaulty.s3.ap-southeast-1.amazonaws.com/images/default/default_video_thumb.png"
 
 	sizeMB := float32(file.Size) / (1024 * 1024)
 	mimeType := file.Header.Get("Content-Type")
@@ -179,11 +181,13 @@ func storeVideo(db *gorm.DB, file *multipart.FileHeader, albumID uuid.UUID, vide
 		if id, err := uuid.Parse(idStr); err == nil {
 			var existingVideo models.AlbumVideo
 			if err := db.First(&existingVideo, id).Error; err == nil {
-				existingVideo.VideoURL = dst
+				existingVideo.VideoURL = s3URL
 				existingVideo.Size = sizeMB
 				existingVideo.Type = mimeType
 				existingVideo.Description = videoDescription
-				// ThumbnailURL bisa digenerate kemudian
+				existingVideo.ThumbnailURL = thumnailVideo
+
+				// ambil ThumbnailURL
 				return db.Save(&existingVideo).Error
 			}
 		}
@@ -192,15 +196,16 @@ func storeVideo(db *gorm.DB, file *multipart.FileHeader, albumID uuid.UUID, vide
 	// Buat video baru jika ID tidak valid
 	video := models.AlbumVideo{
 		AlbumID:      albumID,
-		VideoURL:     dst,
+		VideoURL:     s3URL,
 		Size:         sizeMB,
 		Type:         mimeType,
 		Description:  videoDescription,
-		ThumbnailURL: "none",
+		ThumbnailURL: thumnailVideo,
 	}
 
 	return db.Create(&video).Error
 }
+
 
 func deleteVideo(db *gorm.DB, albumVideoId uuid.UUID) error {
 	var video models.AlbumVideo
@@ -220,10 +225,9 @@ func deleteVideo(db *gorm.DB, albumVideoId uuid.UUID) error {
 	if err := db.Delete(&video).Error; err != nil {
 		return fmt.Errorf("failed to delete video: %w", err)
 	}
-
-	// TODO: Hapus file video dari storage jika diperlukan
-	if err := os.Remove(video.VideoURL); err != nil {
-		fmt.Printf("Failed to delete video file: %v", err)
+	// Hapus file dari S3
+	if err := utils.DeleteFromS3(video.VideoURL, "s3-pixovaulty"); err != nil {
+		fmt.Printf("⚠️ Failed to delete S3 video: %v\n", err)
 	}
 
 	return nil
@@ -253,15 +257,15 @@ func deleteImage(db *gorm.DB, albumImageId uuid.UUID) error {
 
 	if image.ImageURL != "" {
 		fmt.Println("🔄 File yang akan dihapus:", image.ImageURL)
-		if err := os.Remove(image.ImageURL); err != nil {
-			fmt.Printf("⚠️ Gagal hapus file: %v\n", err)
-			// optional: return error jika wajib dihapus
+		// Hapus file dari S3
+		if err := utils.DeleteFromS3(image.ImageURL, "s3-pixovaulty"); err != nil {
+			fmt.Printf("⚠️ Failed to delete S3 video: %v\n", err)
 		}
+	
 	}
 
 	return nil
 }
-
 
 
 func storeTags(form *multipart.Form, db *gorm.DB, album models.Album) error {
@@ -294,10 +298,18 @@ func StoreAlbums(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceCl
 	userID, err := utils.GetUserID(ctx)
 
 	fmt.Println("userID : x ", userID)
+	
 
 	if err != nil {
 		return ctx.SendStatus(200)
 	}
+
+	var user models.User
+
+	if errAcc := db.Where("id = ?", userID).First(&user).Error; errAcc != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Akun Tidak Ditemukan"})
+	}
+
 
 	// Validasi form input
 	title := ctx.FormValue("title")
@@ -320,12 +332,12 @@ func StoreAlbums(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceCl
 
 	var targetEmailRaw json.RawMessage
 	if len(targetEmailJSON) > 0 {
-		if marshaled, err := json.Marshal(targetEmailJSON); err == nil {
+		if marshaled, errMars := json.Marshal(targetEmailJSON); errMars == nil {
 			targetEmailRaw = marshaled
 		}
 	}
-
-
+	
+	
 
 	// Simpan Album
 	album := models.Album{
@@ -393,13 +405,44 @@ func StoreAlbums(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceCl
 		}
 	}
 
+	sharedBy := user.UserName
+	if sharedBy == "" {
+		sharedBy = user.FirstName + " " + user.LastName
+	}
+
+	//get random image or thumbnail video
+			// Get random cover image from album images
+	var albumFull models.Album
+	if errAlbum := db.Preload("AlbumImages").Preload("AlbumVideos").Where("id = ?", album.ID).First(&albumFull).Error; errAlbum != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"message": "Gagal Mengambil Album",
+			"error":   err.Error(),
+		})
+	}
+
+	coverImage := ""
+	if len(albumFull.AlbumImages) > 0 {
+		randomIdx := time.Now().UnixNano() % int64(len(albumFull.AlbumImages))
+		coverImage = albumFull.AlbumImages[randomIdx].ImageURL
+	} else {
+		randomIdx := time.Now().UnixNano() % int64(len(albumFull.AlbumVideos))
+		coverImage = albumFull.AlbumVideos[randomIdx].ThumbnailURL
+	}
+
+
+	albumFull.CoverImage = coverImage
+
+	if err := db.Save(&albumFull).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal update album"})
+	}
+
 	// Send notifications in background
-	go func(album models.Album, emails []string) {
+	go func(album models.Album, user models.User, emails []string) {
 		var wg sync.WaitGroup
 
 		for _, email := range emails {
 			wg.Add(1)
-			go func(album models.Album, email string) {
+			go func(album models.Album, user models.User, email string) {
 				defer wg.Done()
 
 				ctxNotif, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -412,20 +455,21 @@ func StoreAlbums(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceCl
 					Name:    email,
 					Body:    fmt.Sprintf("Klik link berikut untuk melihat album: http://localhost:5173/album-share?email=%s", email),
 					Metadata: map[string]string{
-						"album_name": album.Title,
-						"album_url" : fmt.Sprintf("http://localhost:5173/albums/=%s/details", album.ID),
+						"album_title": album.Title,
+						"album_link" : fmt.Sprintf("http://localhost:5173/albums/%s/details", album.ID),
 						"platform_name": "PixoVaulty",
 						"platform_url": "www.pixovaulty.com",
+						"shared_by": sharedBy,
 					},
 				})
 				if err != nil {
 					log.Printf("Gagal mengirim notifikasi ke %s: %v", email, err)
 				}
-			}(album, email)
+			}(album, user, email)
 		}
 
 		wg.Wait()
-	}(album, targetEmailJSON)
+	}(album, user, targetEmailJSON)
 
 
 	return ctx.Status(fiber.StatusCreated).JSON(fiber.Map{
@@ -712,6 +756,13 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 			}
 		}
 
+		// Ambil key dari URL
+		key := strings.TrimPrefix(img.ImageURL, "https://s3-pixovaulty.s3.ap-southeast-1.amazonaws.com/")
+		signedURL, errURL := utils.GeneratePresignedURL("s3-pixovaulty", key)
+		if errURL != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal generate presigned URL"})
+		}
+
 		indexMedia = uuid.New()
 		albumMedias = append(albumMedias, AlbumMedia{
 			AlbumMediaID: indexMedia,
@@ -719,10 +770,11 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 			AlbumID:      img.AlbumID,
 			Description:  img.Description,
 			LikesCount:   img.LikesCount,
-			URL:          img.ImageURL,
+			URL:          signedURL,
 			Size:         img.Size,
 			Type:         img.Type,
 			CreatedAt:    img.CreatedAt,
+			CreatedAtModified: img.CreatedAt.Format("02 Jan 2006"),
 			UserHasLike:  hasLike,
 			MediaKind:    "image",
 		})
@@ -742,6 +794,12 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 			}
 		}
 
+		key := strings.TrimPrefix(vid.VideoURL, "https://s3-pixovaulty.s3.ap-southeast-1.amazonaws.com/")
+		signedURL, errURL := utils.GeneratePresignedURL("s3-pixovaulty", key)
+		if errURL != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal generate presigned URL"})
+		}
+
 
 		indexMedia = uuid.New()
 		albumMedias = append(albumMedias, AlbumMedia{
@@ -751,10 +809,11 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 			Description:  vid.Description,
 			LikesCount:   vid.LikesCount,
 			UserHasLike:  hasLike,
-			URL:          vid.VideoURL,
+			URL:          signedURL,
 			Size:         vid.Size,
 			Type:         vid.Type,
 			CreatedAt:    vid.CreatedAt,
+			CreatedAtModified: vid.CreatedAt.Format("02 January 2006"),
 			MediaKind:    "video",
 		})
 
@@ -836,12 +895,13 @@ func GetAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 		Description: albumRequest.Description,
 		Tags: albumTagList,
 		Title: albumRequest.Title,
-		LikeCount: int(likeCount),
+		LikeCount: int(albumRequest.LikesCount),
 		ViewCount: int(albumRequest.ViewCount),
 		ImageCount: imageCount,
 		VideoCount: videoCount,
 		AlbumPrivacy: albumRequest.AlbumPrivacy,
 		TargetEmail: albumRequest.TargetEmail,
+		CreatedAt: albumRequest.CreatedAt.Format("02 January 2006"),
 	}
 
 	var like models.AlbumLike
@@ -1051,6 +1111,7 @@ func GetAllAlbums(ctx *fiber.Ctx, db *gorm.DB) error {
 	
 
 	offset := (page - 1) * limit
+
 	if err := query.Offset(offset).Limit(limit).Find(&albums).Error; err != nil {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"message": "Album failed to reload",
@@ -1095,18 +1156,28 @@ func GetAllAlbums(ctx *fiber.Ctx, db *gorm.DB) error {
 		}
 
 		// Get random cover image from album images
-		coverImage := ""
-		if len(album.AlbumImages) > 0 {
-			randomIdx := time.Now().UnixNano() % int64(len(album.AlbumImages))
-			coverImage = album.AlbumImages[randomIdx].ImageURL
+		// coverImage := ""
+		// if len(album.AlbumImages) > 0 {
+		// 	randomIdx := time.Now().UnixNano() % int64(len(album.AlbumImages))
+		// 	coverImage = album.AlbumImages[randomIdx].ImageURL
+		// } else {
+		// 	randomIdx := time.Now().UnixNano() % int64(len(album.AlbumVideos))
+		// 	coverImage = album.AlbumVideos[randomIdx].ThumbnailURL
+		// }
+
+		key := strings.TrimPrefix(album.CoverImage, "https://s3-pixovaulty.s3.ap-southeast-1.amazonaws.com/")
+		coverImageSignedURL, errURL :=  utils.GeneratePresignedURL("s3-pixovaulty", key)
+		if errURL != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal generate presigned URL"})
 		}
+
 		// album.CoverImage = coverImage
 
 		albumsWithLastUpdate = append(albumsWithLastUpdate, AlbumWithLastUpdate{
 			AlbumID: album.ID,
 			Title:      album.Title,
 			Description: album.Description,
-			ThumbnailURL: coverImage,
+			ThumbnailURL: coverImageSignedURL,
 			ImageCount: len(album.AlbumImages),
 			VideoCount:  len(album.AlbumVideos),
 			MediaCount: len(album.AlbumImages) + len(album.AlbumVideos),
@@ -1160,12 +1231,18 @@ func GetLatestImage(ctx *fiber.Ctx, db *gorm.DB) error {
 			desc = album.AlbumImages[randomIdx].Description
 			likecount = int(album.AlbumImages[randomIdx].LikesCount)
 		}
+		
+		key := strings.TrimPrefix(coverImage, "https://s3-pixovaulty.s3.ap-southeast-1.amazonaws.com/")
+		coverImageSignedURL, errURL :=  utils.GeneratePresignedURL("s3-pixovaulty", key)
+		if errURL != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal generate presigned URL"})
+		}
 
 		imageLatestList = append(imageLatestList, ImageLatest{
 			AlbumID: album.ID,
 			Description:  desc,
 			LikeCount:    likecount,
-			ThumbnailURL: coverImage,
+			ThumbnailURL: coverImageSignedURL,
 		})
 
 	}
@@ -1557,6 +1634,11 @@ func ClickLikeAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 		// Hapus record like album
 		db.Delete(&existingLike)
 
+		//kurangi Like di album
+		if err := db.Model(&album).Update("likes_count", gorm.Expr("likes_count - 1")).Error; err != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengurangi like album"})
+		}
+
 		return ctx.Status(fiber.StatusOK).JSON(fiber.Map{"message": "Unlike berhasil"})
 	}
 
@@ -1611,6 +1693,10 @@ func ClickLikeAlbum(ctx *fiber.Ctx, db *gorm.DB) error {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal menyimpan data like"})
 	}
 
+	if err := db.Model(&album).Update("likes_count", gorm.Expr("likes_count + 1")).Error; err != nil {
+		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengurangi like video"})
+	}
+
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
 		"message": "Like berhasil",
 	})
@@ -1634,14 +1720,22 @@ func GetAlbumComments(ctx *fiber.Ctx, db *gorm.DB) error {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengambil komentar"})
 	}
 
+
+
 	var response []AlbumCommentResponse
 	for _, comment := range comments {
+		key := strings.TrimPrefix(comment.User.ProfilePicture, "https://s3-pixovaulty.s3.ap-southeast-1.amazonaws.com/")
+		avatarSignedURL, errURL :=  utils.GeneratePresignedURL("s3-pixovaulty", key)
+		if errURL != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal generate presigned URL"})
+		}
+
 		response = append(response, AlbumCommentResponse{
 			ID:        comment.ID,
 			AlbumID:   comment.AlbumID,
 			UserID:    comment.UserID,
 			User:      fmt.Sprintf("%s %s", comment.User.FirstName, comment.User.LastName),
-			UserAvatar:	comment.User.ProfilePicture,
+			UserAvatar:	avatarSignedURL,
 			Comment:   comment.Comment,
 			CreatedAt: comment.CreatedAt.Format("02 Jan 2006 15:04"),
 		})
@@ -1781,6 +1875,9 @@ func GetAlbumFollower(ctx *fiber.Ctx, db *gorm.DB) error {
 		if len(album.AlbumImages) > 0 {
 			randomIdx := time.Now().UnixNano() % int64(len(album.AlbumImages))
 			coverImage = album.AlbumImages[randomIdx].ImageURL
+		} else {
+			randomIdx := time.Now().UnixNano() % int64(len(album.AlbumVideos))
+			coverImage = album.AlbumVideos[randomIdx].VideoURL
 		}
 
 		if album.AlbumPrivacy == "restricted" {
@@ -1802,6 +1899,13 @@ func GetAlbumFollower(ctx *fiber.Ctx, db *gorm.DB) error {
 			}
 		}
 
+		key := strings.TrimPrefix(coverImage, "https://s3-pixovaulty.s3.ap-southeast-1.amazonaws.com/")
+		coverImageSignedURL, errURL :=  utils.GeneratePresignedURL("s3-pixovaulty", key)
+		if errURL != nil {
+			return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal generate presigned URL"})
+		}
+
+
 		albumsWithLastUpdate = append(albumsWithLastUpdate, AlbumWithLastUpdate{
 			AlbumID:      album.ID,
 			Title:        album.Title,
@@ -1809,7 +1913,7 @@ func GetAlbumFollower(ctx *fiber.Ctx, db *gorm.DB) error {
 			MediaCount:   len(album.AlbumImages) + len(album.AlbumVideos),
 			ImageCount:   len(album.AlbumImages),
 			VideoCount:   len(album.AlbumVideos),
-			ThumbnailURL: coverImage,
+			ThumbnailURL: coverImageSignedURL,
 			LastUpdate:   lastUpdate,
 			UserDetail: UserDetail{
 				UserID: album.User.ID,
