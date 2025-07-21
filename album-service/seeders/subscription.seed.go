@@ -14,7 +14,7 @@ func SeedSubscriptions(db *gorm.DB) error {
 		{
 			ID:               uuid.New(),
 			SubscriptionType: "Basic",
-			StorageCapacity:  100,        // dalam GB
+			StorageCapacity:  10,        // dalam GB
 			MaximumMediaSize: 0.1,      // 100 MB = 0.1 GB
 			Features:         []byte(`["Basic Support", "3 GB Storage", "Max 100MB media upload"]`),
 			CreatedAt:        time.Now(),

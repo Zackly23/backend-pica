@@ -35,6 +35,7 @@ type UserSignUpRequest struct {
 	Email           string `json:"email" validate:"required,email"`
 	Password        string `json:"password" validate:"required,min=6"`
 	PasswordConfirm string `json:"passwordConfirm" validate:"required"`
+	AgreeTermService bool `json:"agreeTermService" validate:"required"`
 }
 
 type UserLoginRequest struct {
@@ -118,7 +119,7 @@ func Login(ctx *fiber.Ctx, db *gorm.DB) error {
 	}
 
 	if err := db.Preload("AccountConfig").Where("email = ?", req.Email).First(&user).Error; err != nil {
-		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"message": "Akun tidak ditemukan",
 		})
 	}
@@ -265,6 +266,8 @@ func SignUp(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClient)
 		})
 	}
 
+	defaultAvatar := "https://s3-pixovaulty.s3.ap-southeast-1.amazonaws.com/images/default/default_avatar.png"
+
 
 	// Simpan user baru ke database
 	user := models.User{
@@ -274,6 +277,9 @@ func SignUp(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClient)
 		Password:    string(hashedPassword),
 		Status: "active",
 		SubscriptionID: subscription.ID,
+		AgreeTermService: req.AgreeTermService,
+		ProfilePicture: defaultAvatar,
+		
 	}
 
 	if err := db.Create(&user).Error; err != nil {
@@ -293,6 +299,9 @@ func SignUp(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClient)
 		SubscriptionID: subscription.ID,
 		StartDate: time.Now(),
 		EndDate: time.Now().AddDate(0,0,30),
+		PaymentMethod: "Free Method",
+		Status: "Free Tier",
+		Amount: 0.00,
 	}
 
 	if err := db.Create(&newUserSubscription).Error; err != nil {
@@ -333,6 +342,27 @@ func SignUp(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClient)
 		}
 	}(user, client)
 
+
+	go func(user models.User, client notif.NotificationServiceClient) {
+		ctxNotif, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := client.SendNotification(ctxNotif, &notif.NotificationRequest{
+			To:      user.Email,
+			Subject: "Subscription Free Tier",
+			Type:    "subscription",
+			Name:    user.FirstName + " " + user.LastName,
+			Body:    "Akun Anda berhasil didaftarkan. Silakan login untuk mulai menggunakan aplikasi.",
+			Metadata: map[string]string{
+				"expired_date": time.Now().AddDate(0, 0, 30).Format("2006-01-02"),
+			},
+
+		})
+
+		if err != nil {
+			log.Printf("Gagal mengirim notifikasi ke %s: %v", user.Email, err)
+		}
+	}(user, client)
 	
 	return ctx.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"message": "User berhasil dibuat",
@@ -551,7 +581,7 @@ func ChangePassword(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServic
 	})
 }
 
-func DeactivateAccount(ctx *fiber.Ctx, db *gorm.DB) error {
+func DeactivateAccount(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClient) error {
 	userID, errID := utils.GetUserID(ctx)
 
 	fmt.Println("user id : ", userID)
@@ -586,12 +616,30 @@ func DeactivateAccount(ctx *fiber.Ctx, db *gorm.DB) error {
 		})
 	}
 
+	// 🔄 Kirim notifikasi lewat gRPC di background
+	go func(user models.User, client notif.NotificationServiceClient) {
+		ctxNotif, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := client.SendNotification(ctxNotif, &notif.NotificationRequest{
+			To:      user.Email,
+			Subject: "Deaktifasi Akun Berhasil",
+			Type:    "deactivate-account",
+			Name:    user.FirstName + " " + user.LastName,
+			Body:    "Successfully Deactivate Your Account",
+		})
+
+		if err != nil {
+			log.Printf("Failed to send notification to %s: %v", user.Email, err)
+		}
+	}(user, client)
+
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
 		"message" : "Permintaan Deactivate Akun Sudah Ditindak Lanjuti ",
 	})
 }
 
-func DeleteAccount(ctx *fiber.Ctx, db *gorm.DB) error {
+func DeleteAccount(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClient) error {
 	userID, errID := utils.GetUserID(ctx)
 
 	fmt.Println("user id : ", userID)
@@ -623,6 +671,33 @@ func DeleteAccount(ctx *fiber.Ctx, db *gorm.DB) error {
 			"message": "Gagal Menyimpan Status",
 		})
 	}
+
+	//hapus semua media AlbumImages dan AlbumVideos
+
+	//hapus Riwayat UserSubscription
+
+	//hapus riwayat Following
+
+	//hapus AccountConfig
+
+
+	// 🔄 Kirim notifikasi lewat gRPC di background
+	go func(user models.User, client notif.NotificationServiceClient) {
+		ctxNotif, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := client.SendNotification(ctxNotif, &notif.NotificationRequest{
+			To:      user.Email,
+			Subject: "Delete Account",
+			Type:    "delete-account",
+			Name:    user.FirstName + " " + user.LastName,
+			Body:    "Two-factor authentication (TFA) has been successfully enabled for your account.",
+		})
+
+		if err != nil {
+			log.Printf("Failed to send notification to %s: %v", user.Email, err)
+		}
+	}(user, client)
 
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{
 		"message" : "Permintaan Deactivate Akun Sudah Ditindak Lanjuti ",
@@ -842,22 +917,31 @@ func VerifyTFA(ctx *fiber.Ctx, db *gorm.DB, client notif.NotificationServiceClie
 	// 	return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Gagal mengaktifkan 2FA"})
 	// }
 
-	go func(user models.User, client notif.NotificationServiceClient) {
+	ip := ctx.IP()
+	loginTime := time.Now().Format(time.RFC3339)
+
+	go func(user models.User, client notif.NotificationServiceClient, ip, loginTime string) {
 		ctxNotif, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		_, err := client.SendNotification(ctxNotif, &notif.NotificationRequest{
 			To:      user.Email,
-			Subject: "Login dengan Two-Factor Authentication",
-			Type:    "two-factor-auth",
+			Subject: "Login Two-Factor Authentication",
+			Type:    "two-factor-login",
 			Name:    user.FirstName + " " + user.LastName,
 			Body:    "Anda berhasil login menggunakan two-factor authentication (TFA). Jika ini bukan Anda, segera amankan akun Anda.",
+			Metadata: map[string]string{
+				"login_time": loginTime,
+				"ip_address": ip,
+				"location":   "-",
+			},
 		})
 
 		if err != nil {
 			log.Printf("Failed to send notification to %s: %v", user.Email, err)
 		}
-	}(user, client)
+	}(user, client, ip, loginTime)
+
 
 	return ctx.Status(fiber.StatusOK).JSON(fiber.Map{"message": "TOTP berhasil diverifikasi"})
 }

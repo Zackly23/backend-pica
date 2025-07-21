@@ -28,3 +28,4 @@ func SaveMultipartFile(file *multipart.FileHeader, dst string) error {
 func CreateFile(path string) (*os.File, error) {
 	return os.Create(path)
 }
+

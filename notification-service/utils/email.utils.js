@@ -3,7 +3,7 @@ const fs = require("fs");
 
 function getTemplateHTML(type, variables = {}) {
   let templateFile = "";
-
+  console.log('type template : ', type)
   switch (type) {
     case "password-reset":
       templateFile = "reset.password.html";
@@ -11,8 +11,17 @@ function getTemplateHTML(type, variables = {}) {
     case "deactivate-account":
       templateFile = "deactivate.account.html";
       break;
+    case "delete-account":
+      templateFile = "delete.account.html";
+      break;
+    case "account-signup":
+      templateFile = "account.signup.html";
+      break;
     case "two-factor-auth":
       templateFile = "twofactor.auth.html";
+      break;
+    case "two-factor-login":
+      templateFile = "twofactor.login.html";
       break;
     case "subscription":
       templateFile = "subscription.html";
@@ -22,6 +31,7 @@ function getTemplateHTML(type, variables = {}) {
       break;
     case "album-invitation":
       templateFile = "album.invitation.html";
+      break;
     default:
       throw new Error("Unknown template type");
   }

@@ -59,6 +59,7 @@ type Album struct {
 	Comments	 []AlbumComment  `gorm:"foreignKey:AlbumID" json:"album_comments,omitempty"`
 	TargetEmail  json.RawMessage `gorm:"type:jsonb" json:"target_email,omitempty"`
 	ViewCount    uint           	`gorm:"default:0" json:"view_count"`
+	LikesCount   uint           `gorm:"default:0" json:"likes_count"`
 	CreatedAt    time.Time       `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt    time.Time       `gorm:"autoUpdateTime" json:"updated_at"`
 	DeletedAt    gorm.DeletedAt  `gorm:"index" json:"deleted_at,omitempty"`
