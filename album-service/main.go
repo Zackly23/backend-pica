@@ -78,7 +78,7 @@ func main() {
 	cronJob.Start()
 
 
-	conn, err := grpc.NewClient(":50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("notification-service:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
     if err != nil {
         log.Fatalf("did not connect: %v", err)
     }
@@ -91,7 +91,7 @@ func main() {
 	app := fiber.New()
 
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: "http://localhost:5173",
+		AllowOrigins: "https://www.pixovault.site/",
 		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
 		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
 		AllowCredentials: true,
