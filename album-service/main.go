@@ -21,8 +21,6 @@ import (
 	"github.com/Zackly23/queue-app/jobs"
 	notif "github.com/Zackly23/queue-app/proto/notificationpb"
 
-	// "github.com/Zackly23/queue-app/wasabi"
-
 	"github.com/Zackly23/queue-app/routes"
 )
 
@@ -39,11 +37,6 @@ func main() {
 
 
 	//setup s3
-
-	bucket = config.AWSS3Bucket{
-		BucketName: "your-bucket-name",
-		Region:     "ap-southeast-1", // contoh region
-	}
 
 	bucket.SetupBucket()
 	bucket.Test()
@@ -91,7 +84,7 @@ func main() {
 	app := fiber.New()
 
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: "https://www.pixovault.site/",
+		AllowOrigins: "https://pixovault.site/",
 		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
 		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
 		AllowCredentials: true,
